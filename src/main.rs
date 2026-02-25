@@ -1,3 +1,4 @@
+use globset::{Glob, GlobSetBuilder};
 use guppy::{graph::PackageGraph, MetadataCommand};
 use std::env;
 use std::io::Write;
@@ -15,17 +16,33 @@ fn main() {
         return;
     }
 
-    // FORCE_TRIGGERS env var; entries are newline- or space-separated.
-    // Each entry is matched as either an exact filename or a path prefix (if it ends with '/').
+    // FORCE_TRIGGERS env var; entries are newline- or space-separated glob patterns.
+    // Trailing-slash entries (e.g. "infra/") are normalised to "infra/**" so they
+    // match all files inside that directory. Patterns support *, **, and ? via globset.
     let force_triggers: Vec<String> = env::var("FORCE_TRIGGERS")
         .map(|v| v.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
 
-    let force_all = changed_files.iter().any(|f| {
-        force_triggers
-            .iter()
-            .any(|trigger| f == trigger || f.starts_with(trigger.as_str()))
-    });
+    let force_all =
+        if force_triggers.is_empty() {
+            false
+        } else {
+            let mut builder = GlobSetBuilder::new();
+            for trigger in &force_triggers {
+                let pattern = if trigger.ends_with('/') {
+                    format!("{}**", trigger)
+                } else {
+                    trigger.clone()
+                };
+                builder.add(Glob::new(&pattern).unwrap_or_else(|e| {
+                    panic!("Invalid force_trigger glob pattern {pattern:?}: {e}")
+                }));
+            }
+            let globset = builder
+                .build()
+                .expect("Failed to build force_triggers glob set");
+            changed_files.iter().any(|f| globset.is_match(f))
+        };
 
     let mut cmd = MetadataCommand::new();
     let graph = PackageGraph::from_command(&mut cmd)
@@ -81,7 +98,6 @@ fn main() {
         .packages(guppy::graph::DependencyDirection::Forward)
         .filter(|pkg| {
             workspace.contains_name(pkg.name())
-                && pkg.manifest_path().as_str().contains("/services/")
                 && pkg
                     .build_targets()
                     .any(|t| t.kind() == guppy::graph::BuildTargetKind::Binary)
@@ -99,18 +115,18 @@ fn main() {
 }
 
 fn emit_output(force: bool, changed: Vec<String>, affected: Vec<String>, binaries: Vec<String>) {
-    let github_actions = env::args().any(|a| a == "--github-actions");
-
     let changed_json = serde_json::to_string(&changed).unwrap();
     let affected_json = serde_json::to_string(&affected).unwrap();
     let binaries_json = serde_json::to_string(&binaries).unwrap();
     let force_str = force.to_string();
 
-    if github_actions {
-        let path = env::var("GITHUB_OUTPUT").expect("GITHUB_OUTPUT not set");
+    // When GITHUB_OUTPUT is set (i.e. running inside a GitHub Actions runner)
+    // write key=value pairs to the output file expected by the runner.
+    // Otherwise fall back to printing a JSON object to stdout for local use.
+    if let Ok(path) = env::var("GITHUB_OUTPUT") {
         let mut file = std::fs::OpenOptions::new()
             .append(true)
-            .open(path)
+            .open(&path)
             .expect("Failed to open GITHUB_OUTPUT");
         writeln!(file, "changed_crates={changed_json}").unwrap();
         writeln!(file, "affected_library_members={affected_json}").unwrap();

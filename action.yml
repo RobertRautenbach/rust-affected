@@ -1,7 +1,9 @@
 name: rust-affected
 description: >
-  Detects changed files since the last push and computes affected packages
-  and services via the Cargo dependency graph.
+  Detects changed files since a given base SHA and computes affected Cargo
+  workspace members and deployable binaries via the Cargo dependency graph.
+  Only packages that are members of the workspace are reported; path
+  dependencies outside the workspace root are not tracked.
 author: Robert Rautenbach
 branding:
   icon: git-branch
@@ -9,13 +11,24 @@ branding:
 
 inputs:
   base_sha:
-    description: The SHA to compare against. Defaults to github.event.before.
+    description: >
+      The SHA to compare against.
+      On pull_request events this defaults to the base branch tip (github.event.pull_request.base.sha),
+      so every push to a PR branch is always diffed against main regardless of how many commits
+      have been pushed.
+      On push events (e.g. a direct push to main) it falls back to github.event.before,
+      which is the commit that was HEAD before the push.
+      Override this input to use a different base.
     required: false
-    default: ${{ github.event.before }}
+    default: ${{ github.event.pull_request.base.sha || github.event.before }}
   force_triggers:
     description: >
-      Space- or newline-separated list of files/directory prefixes that trigger a full
-      rebuild of the entire workspace when changed. If omitted, no force triggers are applied.
+      Space- or newline-separated list of glob patterns that trigger a full rebuild of the entire
+      workspace when any matching file changes. Supports *, **, and ? via globset.
+      A bare name (e.g. "Cargo.lock") matches that exact path only.
+      A trailing slash (e.g. "infra/") matches the directory and everything inside it.
+      Full glob patterns are also supported (e.g. "**/*.sql", ".github/**").
+      If omitted, no force triggers are applied.
     required: false
 
 outputs:
@@ -35,12 +48,33 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Resolve base SHA
+      id: resolve-sha
+      shell: bash
+      run: |
+        SHA="${{ inputs.base_sha }}"
+        NULL_SHA="0000000000000000000000000000000000000000"
+        if [[ -z "$SHA" || "$SHA" == "$NULL_SHA" ]]; then
+          # SHA is absent or null — this happens on the very first push to a new
+          # branch, or on a force-push that has no prior event SHA.
+          # Fall back to the merge-base with the default branch so we only diff
+          # what is new; if the remote is unavailable fall back to the initial commit.
+          RESOLVED=$(
+            git merge-base HEAD origin/main 2>/dev/null ||
+            git merge-base HEAD origin/master 2>/dev/null ||
+            git rev-list --max-parents=0 HEAD
+          )
+          echo "sha=$RESOLVED" >> "$GITHUB_OUTPUT"
+        else
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Get changed files
       id: changed-files
       uses: tj-actions/changed-files@v45
       with:
         separator: " "
-        base_sha: ${{ inputs.base_sha }}
+        base_sha: ${{ steps.resolve-sha.outputs.sha }}
 
     - name: No changed files detected
       id: no-changes

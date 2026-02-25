@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 guppy = "0.17.25"
+globset = "0.4"
 serde_json = "1"
 
 [profile.release]

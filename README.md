@@ -3,9 +3,9 @@
 A GitHub Action that detects which packages in a Rust workspace are affected by a push, using the Cargo dependency graph.
 
 Given a set of changed files, it determines:
-- **`changed_packages`** — packages with files directly modified
-- **`affected_packages`** — those packages plus any workspace members that (transitively) depend on them
-- **`affected_services`** — the subset of affected packages that are deployable services (binaries under a `services/` directory)
+- **`changed_crates`** — packages with files directly modified
+- **`affected_library_members`** — those packages plus any workspace members that (transitively) depend on them
+- **`affected_binary_members`** — the subset of affected packages that have a binary target
 - **`force_all`** — whether a configured force-trigger file changed, meaning the entire workspace should be considered affected
 
 ## Usage
@@ -15,7 +15,7 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      affected_services: ${{ steps.affected.outputs.affected_services }}
+      affected_binary_members: ${{ steps.affected.outputs.affected_binary_members }}
       force_all: ${{ steps.affected.outputs.force_all }}
     steps:
       - uses: actions/checkout@v4
@@ -45,8 +45,8 @@ jobs:
 
 | Input | Required | Description |
 |---|---|---|
-| `base_sha` | No | The SHA to diff against. Defaults to `github.event.before` (the commit before the push). |
-| `force_triggers` | No | Space- or newline-separated list of files or directory prefixes (e.g. `.github/`) that cause `force_all` to be `true` when changed. If omitted, `force_all` is never set. |
+| `base_sha` | No | The SHA to diff against. On `pull_request` events defaults to `github.event.pull_request.base.sha` (the base branch tip), so every push to a PR always diffs against main. On `push` events defaults to `github.event.before` (the commit that was HEAD before the push). Override to use any SHA. |
+| `force_triggers` | No | Space- or newline-separated list of glob patterns that trigger a full rebuild when any matching file changes. Supports `*`, `**`, and `?`. A bare name (e.g. `Cargo.lock`) matches that exact path only. A trailing slash (e.g. `.github/`) matches the directory and everything inside it. Full globs are also supported (e.g. `**/*.sql`, `migrations/**`). If omitted, `force_all` is never set. |
 
 ## Outputs
 
@@ -54,15 +54,32 @@ jobs:
 |---|---|
 | `changed_crates` | JSON array of crate names with directly changed files |
 | `affected_library_members` | JSON array of all affected workspace members (changed + transitive dependents) |
-| `affected_binary_members` | JSON array of affected deployable binaries (packages under `services/`) |
+| `affected_binary_members` | JSON array of affected workspace members that have a binary target |
 | `force_all` | `"true"` if a force-trigger file changed, otherwise `"false"` |
 
 ## How `base_sha` works
 
-- **Direct push to a branch** — `github.event.before` is the SHA that was `HEAD` before the push, giving an exact diff of what changed.
-- **Merge commit** — `github.event.before` is the tip of the base branch before the merge, so the diff covers all changes introduced by the merge.
-- **First push to a new branch** — `github.event.before` will be all zeros. In this case `tj-actions/changed-files` returns all files, which triggers a full build. You can supply an explicit `base_sha` to override this behaviour.
+The diff base is chosen automatically depending on the event type:
 
-## Requirements
+| Scenario | Default base |
+|---|---|
+| Push to a PR branch (any push, not just the first) | `github.event.pull_request.base.sha` — the tip of the base branch. Every push to the PR is always diffed against main, so no changes are ever missed across multiple pushes. |
+| Direct push to main (or any branch outside a PR) | `github.event.before` — the commit that was HEAD before the push, giving an exact diff of only what landed in this push. |
+| First push to a new branch / force-push (null SHA) | Falls back to `git merge-base HEAD origin/main` so the diff covers everything introduced on the branch. |
 
-No special runner setup needed. The action runs `cargo metadata` inside a bundled Docker container — Rust does not need to be installed on the runner.
+### Overriding the default
+
+Pass an explicit `base_sha` to compare against any commit:
+
+```yaml
+- uses: robertrautenbach/rust-affected@main
+  with:
+    base_sha: ${{ github.event.before }}   # always use previous-push diff, even on PRs
+```
+
+```yaml
+- uses: robertrautenbach/rust-affected@main
+  with:
+    base_sha: ${{ github.sha }}~1          # always compare to the immediate parent
+```
+
