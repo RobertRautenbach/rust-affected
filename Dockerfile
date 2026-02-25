@@ -1,7 +1,7 @@
-FROM rust:slim-bookworm AS chef
+FROM rust:1.93.1-slim-bookworm AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && \
-    rm -rf /var/lib/apt/lists/* && \
-    cargo install cargo-chef --locked
+    rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked --version 0.1.73
 
 WORKDIR /app
 
@@ -25,10 +25,17 @@ RUN cargo chef cook --release --target "$(cat /rust-target)" --recipe-path recip
 COPY . .
 RUN TARGET="$(cat /rust-target)" && \
     cargo build --release --target "$TARGET" -p rust-affected && \
-    strip "target/$TARGET/release/rust-affected" && \
     cp "target/$TARGET/release/rust-affected" /rust-affected
 
-FROM rust:1-alpine3.23
+FROM rust:1.93.1-alpine3.23
 RUN apk add --no-cache git
+
+LABEL org.opencontainers.image.title="rust-affected"
+LABEL org.opencontainers.image.description="Detects changed files and computes affected Cargo workspace members via the dependency graph"
+LABEL org.opencontainers.image.source="https://github.com/robertrautenbach/rust-affected"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.authors="Robert Rautenbach"
+
 COPY --from=builder /rust-affected /usr/local/bin/rust-affected
-ENTRYPOINT ["rust-affected", "--github-actions"]
+WORKDIR /github/workspace
+ENTRYPOINT ["rust-affected"]
