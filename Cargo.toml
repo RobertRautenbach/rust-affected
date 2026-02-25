@@ -1,0 +1,19 @@
+[package]
+name = "rust-affected"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rust-affected"
+path = "src/main.rs"
+
+[dependencies]
+guppy = "0.17.25"
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

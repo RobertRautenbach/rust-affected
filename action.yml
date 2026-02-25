@@ -1,0 +1,61 @@
+name: rust-affected
+description: >
+  Detects changed files since the last push and computes affected packages
+  and services via the Cargo dependency graph.
+
+branding:
+  icon: git-branch
+  color: orange
+
+inputs:
+  base_sha:
+    description: The SHA to compare against. Defaults to github.event.before.
+    required: false
+    default: ${{ github.event.before }}
+  force_triggers:
+    description: >
+      Space- or newline-separated list of files/directory prefixes that trigger a full
+      rebuild of the entire workspace when changed. If omitted, no force triggers are applied.
+    required: false
+
+outputs:
+  changed_crates:
+    description: JSON array of crates with directly changed files
+    value: ${{ steps.no-changes.outputs.changed_crates || steps.affected.outputs.changed_crates }}
+  affected_library_members:
+    description: JSON array of all affected workspace members (including transitive dependents)
+    value: ${{ steps.no-changes.outputs.affected_library_members || steps.affected.outputs.affected_library_members }}
+  affected_binary_members:
+    description: JSON array of affected deployable binaries (services)
+    value: ${{ steps.no-changes.outputs.affected_binary_members || steps.affected.outputs.affected_binary_members }}
+  force_all:
+    description: Whether a force-trigger file changed
+    value: ${{ steps.no-changes.outputs.force_all || steps.affected.outputs.force_all }}
+
+runs:
+  using: composite
+  steps:
+    - name: Get changed files
+      id: changed-files
+      uses: tj-actions/changed-files@v45
+      with:
+        separator: " "
+        base_sha: ${{ inputs.base_sha }}
+
+    - name: No changed files detected
+      id: no-changes
+      if: steps.changed-files.outputs.all_changed_files == ''
+      shell: bash
+      run: |
+        echo "changed_crates=[]" >> "$GITHUB_OUTPUT"
+        echo "affected_library_members=[]" >> "$GITHUB_OUTPUT"
+        echo "affected_binary_members=[]" >> "$GITHUB_OUTPUT"
+        echo "force_all=false" >> "$GITHUB_OUTPUT"
+
+    - name: Compute affected packages
+      id: affected
+      if: steps.changed-files.outputs.all_changed_files != ''
+      uses: docker://ghcr.io/robertrautenbach/rust-affected:latest
+      env:
+        CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+        FORCE_TRIGGERS: ${{ inputs.force_triggers }}
