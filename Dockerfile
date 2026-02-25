@@ -33,7 +33,7 @@ RUN TARGET="$(cat /rust-target)" && \
     cargo build --release --target "$TARGET" -p rust-affected && \
     cp "target/$TARGET/release/rust-affected" /rust-affected
 
-FROM alpine:3.23
+FROM rust:1.93.1-alpine3.23
 RUN apk add --no-cache git
 
 LABEL org.opencontainers.image.title="rust-affected"
