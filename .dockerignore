@@ -1,0 +1,32 @@
+# Build artifacts
+target/
+
+# Version control
+.git/
+.gitignore
+
+# CI/CD & GitHub
+.github/
+
+# Documentation
+README.md
+LICENSE
+docs/
+
+# Tests & fixtures
+tests/
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+.dockerignore
