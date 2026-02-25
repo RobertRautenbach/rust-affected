@@ -6,5 +6,6 @@ members = [
     "lib-standalone",
     "app-alpha",
     "app-beta",
+    "tools/tool-alpha",
 ]
 resolver = "2"

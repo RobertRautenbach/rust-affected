@@ -38,3 +38,10 @@ version = "0.1.0"
 [[package]]
 name = "lib-utils"
 version = "0.1.0"
+
+[[package]]
+name = "tool-alpha"
+version = "0.1.0"
+dependencies = [
+ "lib-utils",
+]

@@ -47,7 +47,7 @@ jobs:
 |---|---|---|
 | `base_sha` | No | The SHA to diff against. On `pull_request` events defaults to `github.event.pull_request.base.sha` (the base branch tip), so every push to a PR always diffs against main. On `push` events defaults to `github.event.before` (the commit that was HEAD before the push). Override to use any SHA. |
 | `force_triggers` | No | Space- or newline-separated list of glob patterns that trigger a full rebuild when any matching file changes. Supports `*`, `**`, and `?`. A bare name (e.g. `Cargo.lock`) matches that exact path only. A trailing slash (e.g. `.github/`) matches the directory and everything inside it. Full globs are also supported (e.g. `**/*.sql`, `migrations/**`). If omitted, `force_all` is never set. |
-| `excluded_members` | No | Space- or newline-separated list of workspace member names to exclude from all outputs. Useful for internal tooling or helper crates that should never appear in CI results. If omitted, no members are excluded. |
+| `excluded_members` | No | Space- or newline-separated list of workspace member names **or path prefixes** to exclude from all outputs. A plain name (e.g. `my-tool`) matches the crate name directly. An entry containing `/` is matched against the crate's directory relative to the workspace root: a trailing slash (e.g. `tools/`) excludes every crate under that directory, while an exact relative path (e.g. `tools/my-tool`) excludes only that crate. Useful for internal tooling or helper crates that should never appear in CI results. If omitted, no members are excluded. |
 
 ## Outputs
 

@@ -1,5 +1,5 @@
-use guppy::{graph::PackageGraph, MetadataCommand};
-use rust_affected::{compute_affected, AffectedResult};
+use guppy::{MetadataCommand, graph::PackageGraph};
+use rust_affected::{AffectedResult, compute_affected};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -61,12 +61,13 @@ fn change_leaf_lib_affects_all_dependents() {
             "app-beta",
             "lib-core",
             "lib-core-ext",
-            "lib-utils"
+            "lib-utils",
+            "tool-alpha"
         ]
     );
     assert_eq!(
         result.affected_binary_members,
-        vec!["app-alpha", "app-beta"]
+        vec!["app-alpha", "app-beta", "tool-alpha"]
     );
     assert!(!result.force_all);
 }
@@ -171,12 +172,13 @@ fn force_trigger_match_returns_all_members() {
             "lib-core",
             "lib-core-ext",
             "lib-standalone",
-            "lib-utils"
+            "lib-utils",
+            "tool-alpha"
         ]
     );
     assert_eq!(
         result.affected_binary_members,
-        vec!["app-alpha", "app-beta"]
+        vec!["app-alpha", "app-beta", "tool-alpha"]
     );
 }
 
@@ -190,7 +192,7 @@ fn force_trigger_glob_pattern_match() {
     assert!(result.force_all);
     assert_eq!(
         result.affected_binary_members,
-        vec!["app-alpha", "app-beta"]
+        vec!["app-alpha", "app-beta", "tool-alpha"]
     );
 }
 
@@ -218,21 +220,31 @@ fn excluded_member_removed_from_all_lists() {
     let result = compute_affected(graph, &changed, &[], &excluded);
 
     assert_eq!(result.changed_crates, vec!["lib-utils"]);
-    assert!(!result
-        .affected_library_members
-        .contains(&"lib-core".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"lib-utils".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"lib-core-ext".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"app-alpha".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"app-beta".to_string()));
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"lib-core".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"lib-utils".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"lib-core-ext".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"app-alpha".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"app-beta".to_string())
+    );
 }
 
 #[test]
@@ -242,9 +254,11 @@ fn excluded_binary_removed_from_binary_list() {
     let excluded = excludes(&["app-alpha"]);
     let result = compute_affected(graph, &changed, &[], &excluded);
 
-    assert!(!result
-        .affected_binary_members
-        .contains(&"app-alpha".to_string()));
+    assert!(
+        !result
+            .affected_binary_members
+            .contains(&"app-alpha".to_string())
+    );
     assert_eq!(result.affected_binary_members, vec!["app-beta"]);
 }
 
@@ -256,9 +270,11 @@ fn excluded_changed_crate_removed_from_changed_list() {
     let result = compute_affected(graph, &changed, &[], &excluded);
 
     assert!(result.changed_crates.is_empty());
-    assert!(!result
-        .affected_library_members
-        .contains(&"lib-utils".to_string()));
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"lib-utils".to_string())
+    );
 }
 
 // ── File outside any crate ──────────────────────────────────────────
@@ -285,13 +301,20 @@ fn force_all_respects_exclusions() {
     let result = compute_affected(graph, &changed, &triggers, &excluded);
 
     assert!(result.force_all);
-    assert!(!result
-        .affected_library_members
-        .contains(&"app-alpha".to_string()));
-    assert!(!result
-        .affected_library_members
-        .contains(&"lib-standalone".to_string()));
-    assert_eq!(result.affected_binary_members, vec!["app-beta"]);
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"app-alpha".to_string())
+    );
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"lib-standalone".to_string())
+    );
+    assert_eq!(
+        result.affected_binary_members,
+        vec!["app-beta", "tool-alpha"]
+    );
 }
 
 // ── Transitive dependency chain fully resolved ──────────────────────
@@ -302,24 +325,39 @@ fn transitive_chain_fully_resolved() {
     let changed = s(&["lib-utils/src/lib.rs"]);
     let result = compute_affected(graph, &changed, &[], &no_excludes());
 
-    // lib-utils → lib-core → lib-core-ext, app-alpha, app-beta
+    // lib-utils → lib-core → lib-core-ext, app-alpha, app-beta, tool-alpha
     // All transitive dependents must appear, not just direct ones.
-    assert!(result
-        .affected_library_members
-        .contains(&"lib-utils".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"lib-core".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"lib-core-ext".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"app-alpha".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"app-beta".to_string()));
-    assert_eq!(result.affected_library_members.len(), 5);
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"lib-utils".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"lib-core".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"lib-core-ext".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"app-alpha".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"app-beta".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"tool-alpha".to_string())
+    );
+    assert_eq!(result.affected_library_members.len(), 6);
 }
 
 // ── Nested file path within a crate ─────────────────────────────────
@@ -353,18 +391,26 @@ fn leaf_binary_does_not_pull_unrelated() {
     assert_eq!(result.affected_library_members, vec!["app-alpha"]);
     assert_eq!(result.affected_binary_members, vec!["app-alpha"]);
     // Ensure unrelated crates are absent
-    assert!(!result
-        .affected_library_members
-        .contains(&"lib-core".to_string()));
-    assert!(!result
-        .affected_library_members
-        .contains(&"lib-utils".to_string()));
-    assert!(!result
-        .affected_library_members
-        .contains(&"lib-standalone".to_string()));
-    assert!(!result
-        .affected_library_members
-        .contains(&"lib-core-ext".to_string()));
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"lib-core".to_string())
+    );
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"lib-utils".to_string())
+    );
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"lib-standalone".to_string())
+    );
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"lib-core-ext".to_string())
+    );
 }
 
 // ── All crates changed at once — no duplicates ──────────────────────
@@ -400,7 +446,7 @@ fn all_crates_changed_no_duplicates() {
 
     assert_eq!(
         result.affected_binary_members,
-        vec!["app-alpha", "app-beta"]
+        vec!["app-alpha", "app-beta", "tool-alpha"]
     );
 }
 
@@ -425,7 +471,8 @@ fn force_trigger_with_normal_change_overlap() {
             "lib-core",
             "lib-core-ext",
             "lib-standalone",
-            "lib-utils"
+            "lib-utils",
+            "tool-alpha"
         ]
     );
 }
@@ -439,18 +486,26 @@ fn excluded_binary_not_in_any_list() {
     let excluded = excludes(&["app-alpha"]);
     let result = compute_affected(graph, &changed, &[], &excluded);
 
-    assert!(!result
-        .affected_library_members
-        .contains(&"app-alpha".to_string()));
-    assert!(!result
-        .affected_binary_members
-        .contains(&"app-alpha".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"app-beta".to_string()));
-    assert!(result
-        .affected_binary_members
-        .contains(&"app-beta".to_string()));
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"app-alpha".to_string())
+    );
+    assert!(
+        !result
+            .affected_binary_members
+            .contains(&"app-alpha".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"app-beta".to_string())
+    );
+    assert!(
+        result
+            .affected_binary_members
+            .contains(&"app-beta".to_string())
+    );
 }
 
 // ── Excluded mid-graph crate still traversed ────────────────────────
@@ -464,25 +519,37 @@ fn excluded_mid_graph_crate_still_traversed() {
 
     // lib-core is excluded from output…
     assert!(!result.changed_crates.contains(&"lib-core".to_string()));
-    assert!(!result
-        .affected_library_members
-        .contains(&"lib-core".to_string()));
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"lib-core".to_string())
+    );
     // …but dependents of lib-core are still reachable via graph traversal
-    assert!(result
-        .affected_library_members
-        .contains(&"app-alpha".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"app-beta".to_string()));
-    assert!(result
-        .affected_library_members
-        .contains(&"lib-core-ext".to_string()));
-    assert!(result
-        .affected_binary_members
-        .contains(&"app-alpha".to_string()));
-    assert!(result
-        .affected_binary_members
-        .contains(&"app-beta".to_string()));
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"app-alpha".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"app-beta".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"lib-core-ext".to_string())
+    );
+    assert!(
+        result
+            .affected_binary_members
+            .contains(&"app-alpha".to_string())
+    );
+    assert!(
+        result
+            .affected_binary_members
+            .contains(&"app-beta".to_string())
+    );
 }
 
 // ── Build script / non-src file in a crate directory ────────────────
@@ -514,4 +581,109 @@ fn path_prefix_no_false_positive() {
     // lib-core-ext has no reverse dependents, so affected is just itself
     assert_eq!(result.affected_library_members, vec!["lib-core-ext"]);
     assert!(result.affected_binary_members.is_empty());
+}
+
+// ── Path-based exclusion ────────────────────────────────────────────
+
+#[test]
+fn path_prefix_excludes_nested_crate() {
+    let graph = fixture_graph();
+    // tool-alpha lives under tools/ and depends on lib-utils.
+    // Changing lib-utils makes tool-alpha affected, but excluding "tools/"
+    // should remove it from all output lists.
+    let changed = s(&["lib-utils/src/lib.rs"]);
+    let excluded = excludes(&["tools/"]);
+    let result = compute_affected(graph, &changed, &[], &excluded);
+
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"tool-alpha".to_string())
+    );
+    assert!(
+        !result
+            .affected_binary_members
+            .contains(&"tool-alpha".to_string())
+    );
+    // Other dependents of lib-utils are still present
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"app-alpha".to_string())
+    );
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"app-beta".to_string())
+    );
+}
+
+#[test]
+fn path_prefix_excludes_nested_crate_from_force_all() {
+    let graph = fixture_graph();
+    let changed = s(&["infra/deploy.yml"]);
+    let triggers = s(&["infra/"]);
+    let excluded = excludes(&["tools/"]);
+    let result = compute_affected(graph, &changed, &triggers, &excluded);
+
+    assert!(result.force_all);
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"tool-alpha".to_string())
+    );
+    assert!(
+        !result
+            .affected_binary_members
+            .contains(&"tool-alpha".to_string())
+    );
+    // Other members still appear
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"app-alpha".to_string())
+    );
+}
+
+#[test]
+fn path_prefix_excludes_direct_change_in_nested_crate() {
+    let graph = fixture_graph();
+    let changed = s(&["tools/tool-alpha/src/main.rs"]);
+    let excluded = excludes(&["tools/"]);
+    let result = compute_affected(graph, &changed, &[], &excluded);
+
+    assert!(result.changed_crates.is_empty());
+    assert!(result.affected_library_members.is_empty());
+    assert!(result.affected_binary_members.is_empty());
+}
+
+#[test]
+fn exact_path_excludes_specific_nested_crate() {
+    let graph = fixture_graph();
+    // Exclude by exact relative directory path (no trailing slash)
+    let changed = s(&["lib-utils/src/lib.rs"]);
+    let excluded = excludes(&["tools/tool-alpha"]);
+    let result = compute_affected(graph, &changed, &[], &excluded);
+
+    assert!(
+        !result
+            .affected_library_members
+            .contains(&"tool-alpha".to_string())
+    );
+    assert!(
+        !result
+            .affected_binary_members
+            .contains(&"tool-alpha".to_string())
+    );
+}
+
+#[test]
+fn nested_crate_detected_when_directly_changed() {
+    let graph = fixture_graph();
+    let changed = s(&["tools/tool-alpha/src/main.rs"]);
+    let result = compute_affected(graph, &changed, &[], &no_excludes());
+
+    assert_eq!(result.changed_crates, vec!["tool-alpha"]);
+    assert_eq!(result.affected_library_members, vec!["tool-alpha"]);
+    assert_eq!(result.affected_binary_members, vec!["tool-alpha"]);
 }

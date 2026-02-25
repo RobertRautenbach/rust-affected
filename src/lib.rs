@@ -11,6 +11,33 @@ pub struct AffectedResult {
     pub affected_binary_members: Vec<String>,
 }
 
+/// Check whether a package should be excluded from results.
+///
+/// Entries that contain a `/` are treated as **path prefixes** and matched against
+/// the package's directory path relative to the workspace root.
+///   - `tools/` matches every crate whose relative directory starts with `tools/`
+///     (e.g. `tools/resource-clone`).
+///   - `tools/resource-clone` matches that exact relative directory.
+///
+/// Entries without a `/` are compared against the **crate name** directly
+/// (e.g. `resource-clone` excludes a crate named `resource-clone` regardless of
+/// where it lives in the workspace).
+fn is_excluded(pkg_name: &str, pkg_relative_dir: &Path, excluded: &HashSet<String>) -> bool {
+    for entry in excluded {
+        if entry.contains('/') {
+            // Path-based exclusion
+            let prefix = entry.strip_suffix('/').unwrap_or(entry.as_str());
+            let dir_str = pkg_relative_dir.to_str().unwrap_or("");
+            if dir_str == prefix || dir_str.starts_with(&format!("{prefix}/")) {
+                return true;
+            }
+        } else if pkg_name == entry {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn check_force_triggers(changed_files: &[String], force_triggers: &[String]) -> bool {
     if force_triggers.is_empty() {
         return false;
@@ -40,6 +67,11 @@ pub fn check_force_triggers(changed_files: &[String], force_triggers: &[String])
 /// affected_library_members, affected_binary_members) but does **not** prune the
 /// dependency graph traversal. An excluded crate is still traversed when resolving
 /// transitive dependents — it simply won't appear in the results.
+///
+/// Exclusion entries that contain `/` are matched as path prefixes against each
+/// package's directory relative to the workspace root (e.g. `tools/` excludes
+/// every crate under `tools/`). Entries without `/` are matched against the crate
+/// name directly.
 pub fn compute_affected(
     graph: &PackageGraph,
     changed_files: &[String],
@@ -59,19 +91,25 @@ pub fn compute_affected(
 
     let workspace_root = graph.workspace().root().as_std_path();
 
-    let mut direct_ids = Vec::new();
-    for pkg in graph.workspace().iter() {
-        let pkg_dir = pkg
+    // Helper: compute the relative directory for a package.
+    let relative_dir = |pkg: &guppy::graph::PackageMetadata| -> std::path::PathBuf {
+        let dir = pkg
             .manifest_path()
             .parent()
             .expect("manifest has no parent")
             .as_std_path();
+        dir.strip_prefix(workspace_root)
+            .unwrap_or(dir)
+            .to_path_buf()
+    };
 
-        let pkg_dir = pkg_dir.strip_prefix(workspace_root).unwrap_or(pkg_dir);
+    let mut direct_ids = Vec::new();
+    for pkg in graph.workspace().iter() {
+        let pkg_dir = relative_dir(&pkg);
 
         if changed_files
             .iter()
-            .any(|f| Path::new(f).starts_with(pkg_dir))
+            .any(|f| Path::new(f).starts_with(&pkg_dir))
         {
             direct_ids.push(pkg.id().clone());
         }
@@ -91,14 +129,20 @@ pub fn compute_affected(
     let mut changed_crates: Vec<String> = direct_ids
         .iter()
         .filter_map(|id| graph.metadata(id).ok())
-        .filter(|pkg| workspace.contains_name(pkg.name()) && !excluded.contains(pkg.name()))
+        .filter(|pkg| {
+            workspace.contains_name(pkg.name())
+                && !is_excluded(pkg.name(), &relative_dir(pkg), excluded)
+        })
         .map(|pkg| pkg.name().to_string())
         .collect();
     changed_crates.sort();
 
     let mut affected_library_members: Vec<String> = affected_set
         .packages(guppy::graph::DependencyDirection::Forward)
-        .filter(|pkg| workspace.contains_name(pkg.name()) && !excluded.contains(pkg.name()))
+        .filter(|pkg| {
+            workspace.contains_name(pkg.name())
+                && !is_excluded(pkg.name(), &relative_dir(pkg), excluded)
+        })
         .map(|pkg| pkg.name().to_string())
         .collect();
     affected_library_members.sort();
@@ -107,7 +151,7 @@ pub fn compute_affected(
         .packages(guppy::graph::DependencyDirection::Forward)
         .filter(|pkg| {
             workspace.contains_name(pkg.name())
-                && !excluded.contains(pkg.name())
+                && !is_excluded(pkg.name(), &relative_dir(pkg), excluded)
                 && pkg
                     .build_targets()
                     .any(|t| t.kind() == guppy::graph::BuildTargetKind::Binary)

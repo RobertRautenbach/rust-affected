@@ -319,5 +319,5 @@ fn all_env_vars_together() {
 
     let binaries: Vec<String> =
         serde_json::from_value(json["affected_binary_members"].clone()).unwrap();
-    assert_eq!(binaries, vec!["app-beta"]);
+    assert_eq!(binaries, vec!["app-beta", "tool-alpha"]);
 }

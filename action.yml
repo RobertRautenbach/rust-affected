@@ -30,9 +30,14 @@ inputs:
     required: false
   excluded_members:
     description: >
-      Space- or newline-separated list of workspace member names to exclude from all
-      outputs (changed_crates, affected_library_members, affected_binary_members).
-      Useful for internal tooling or helper crates that should never be deployed.
+      Space- or newline-separated list of workspace member names or path prefixes
+      to exclude from all outputs (changed_crates, affected_library_members,
+      affected_binary_members). A plain name (e.g. "my-tool") matches the crate
+      name directly. An entry containing "/" is matched against the crate's
+      directory relative to the workspace root: a trailing slash (e.g. "tools/")
+      excludes every crate under that directory, while an exact relative path
+      (e.g. "tools/my-tool") excludes only that crate. Useful for internal
+      tooling or helper crates that should never be deployed.
       If omitted, no members are excluded.
     required: false
 
