@@ -34,6 +34,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Check for relevant changes since last release
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [[ -z "$LAST_TAG" ]]; then
+            echo "No previous release tag found – proceeding."
+          else
+            DIFF=$(git diff --name-only "$LAST_TAG" HEAD -- src/ Dockerfile action.yml Cargo.toml Cargo.lock)
+            if [[ -z "$DIFF" ]]; then
+              echo "::error::No changes to action-relevant files (src/, Dockerfile, action.yml, Cargo.toml, Cargo.lock) since $LAST_TAG. Aborting release."
+              exit 1
+            fi
+            echo "Changed files since $LAST_TAG:"
+            echo "$DIFF"
+          fi
+
       - name: Compute next version
         id: version
         uses: lajosbencz/actions-manual-bump@3d4f105e5aae2cf18ebcdea63e9b0b773ea10822 # v1.0.0
@@ -83,6 +98,14 @@ jobs:
           git tag -f $MAJOR_TAG
           git push origin ${{ steps.version.outputs.new_tag }}
           git push origin $MAJOR_TAG --force
+
+      - name: Update README version references
+        run: |
+          NEW_TAG="${{ steps.version.outputs.new_tag }}"
+          sed -i "s|robertrautenbach/rust-affected@[^ '\"]*|robertrautenbach/rust-affected@${NEW_TAG}|g" README.md
+          git add README.md
+          git diff --cached --quiet || git commit -m "docs: update README example to ${NEW_TAG}"
+          git push origin HEAD:main
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
