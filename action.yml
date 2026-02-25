@@ -74,7 +74,7 @@ runs:
         }
 
         FORCE_NOTICE=""
-        [ "$FORCE" = "true" ] && FORCE_NOTICE=$'\n> ⚠️ **Force all** — a global trigger file changed, entire workspace affected.\n'
+        [ "$FORCE" = "true" ] && FORCE_NOTICE=$'\n ⚠️ **Force all** — a global trigger file changed, entire workspace affected.\n'
 
         cat >> "$GITHUB_STEP_SUMMARY" <<EOF
         ## rust-affected
