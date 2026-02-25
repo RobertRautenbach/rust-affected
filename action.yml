@@ -30,6 +30,13 @@ inputs:
       Full glob patterns are also supported (e.g. "**/*.sql", ".github/**").
       If omitted, no force triggers are applied.
     required: false
+  excluded_members:
+    description: >
+      Space- or newline-separated list of workspace member names to exclude from all
+      outputs (changed_crates, affected_library_members, affected_binary_members).
+      Useful for internal tooling or helper crates that should never be deployed.
+      If omitted, no members are excluded.
+    required: false
 
 outputs:
   changed_crates:
@@ -93,6 +100,7 @@ runs:
       env:
         CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         FORCE_TRIGGERS: ${{ inputs.force_triggers }}
+        EXCLUDED_MEMBERS: ${{ inputs.excluded_members }}
 
     - name: Write job summary
       if: always()

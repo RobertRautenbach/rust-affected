@@ -79,17 +79,23 @@ fn main() {
 
     let workspace = graph.workspace();
 
+    // EXCLUDED_MEMBERS env var: space- or newline-separated crate names to
+    // strip from all three output lists.
+    let excluded: std::collections::HashSet<String> = env::var("EXCLUDED_MEMBERS")
+        .map(|v| v.split_whitespace().map(String::from).collect())
+        .unwrap_or_default();
+
     let mut changed_crates: Vec<String> = direct_ids
         .iter()
         .filter_map(|id| graph.metadata(id).ok())
-        .filter(|pkg| workspace.contains_name(pkg.name()))
+        .filter(|pkg| workspace.contains_name(pkg.name()) && !excluded.contains(pkg.name()))
         .map(|pkg| pkg.name().to_string())
         .collect();
     changed_crates.sort();
 
     let mut affected_library_members: Vec<String> = affected_set
         .packages(guppy::graph::DependencyDirection::Forward)
-        .filter(|pkg| workspace.contains_name(pkg.name()))
+        .filter(|pkg| workspace.contains_name(pkg.name()) && !excluded.contains(pkg.name()))
         .map(|pkg| pkg.name().to_string())
         .collect();
     affected_library_members.sort();
@@ -98,6 +104,7 @@ fn main() {
         .packages(guppy::graph::DependencyDirection::Forward)
         .filter(|pkg| {
             workspace.contains_name(pkg.name())
+                && !excluded.contains(pkg.name())
                 && pkg
                     .build_targets()
                     .any(|t| t.kind() == guppy::graph::BuildTargetKind::Binary)
