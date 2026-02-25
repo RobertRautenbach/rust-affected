@@ -173,6 +173,7 @@ fn force_trigger_match_returns_all_members() {
             "lib-core-ext",
             "lib-standalone",
             "lib-utils",
+            "lib-with-tests",
             "tool-alpha"
         ]
     );
@@ -472,6 +473,7 @@ fn force_trigger_with_normal_change_overlap() {
             "lib-core-ext",
             "lib-standalone",
             "lib-utils",
+            "lib-with-tests",
             "tool-alpha"
         ]
     );
@@ -686,4 +688,40 @@ fn nested_crate_detected_when_directly_changed() {
     assert_eq!(result.changed_crates, vec!["tool-alpha"]);
     assert_eq!(result.affected_library_members, vec!["tool-alpha"]);
     assert_eq!(result.affected_binary_members, vec!["tool-alpha"]);
+}
+
+// ── Library crate with integration tests is not a binary ──────────────
+
+#[test]
+fn library_with_tests_is_not_binary() {
+    let graph = fixture_graph();
+    let changed = s(&["lib-with-tests/src/lib.rs"]);
+    let result = compute_affected(graph, &changed, &[], &no_excludes());
+
+    assert_eq!(result.changed_crates, vec!["lib-with-tests"]);
+    assert_eq!(result.affected_library_members, vec!["lib-with-tests"]);
+    // lib-with-tests has integration tests but no main.rs — it must NOT
+    // appear in affected_binary_members.
+    assert!(result.affected_binary_members.is_empty());
+}
+
+#[test]
+fn library_with_tests_excluded_from_binaries_on_force_all() {
+    let graph = fixture_graph();
+    let changed = s(&["infra/deploy.yml"]);
+    let triggers = s(&["infra/"]);
+    let result = compute_affected(graph, &changed, &triggers, &no_excludes());
+
+    assert!(result.force_all);
+    // lib-with-tests should appear in library members but NOT binary members
+    assert!(
+        result
+            .affected_library_members
+            .contains(&"lib-with-tests".to_string())
+    );
+    assert!(
+        !result
+            .affected_binary_members
+            .contains(&"lib-with-tests".to_string())
+    );
 }

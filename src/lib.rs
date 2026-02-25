@@ -154,7 +154,7 @@ pub fn compute_affected(
                 && !is_excluded(pkg.name(), &relative_dir(pkg), excluded)
                 && pkg
                     .build_targets()
-                    .any(|t| t.kind() == guppy::graph::BuildTargetKind::Binary)
+                    .any(|t| matches!(t.id(), guppy::graph::BuildTargetId::Binary(_)))
         })
         .map(|pkg| pkg.name().to_string())
         .collect();
