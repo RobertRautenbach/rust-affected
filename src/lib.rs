@@ -34,6 +34,12 @@ pub fn check_force_triggers(changed_files: &[String], force_triggers: &[String])
     changed_files.iter().any(|f| globset.is_match(f))
 }
 
+/// Compute which workspace crates are affected by a set of changed files.
+///
+/// `excluded` filters crate names from all three output lists (changed_crates,
+/// affected_library_members, affected_binary_members) but does **not** prune the
+/// dependency graph traversal. An excluded crate is still traversed when resolving
+/// transitive dependents — it simply won't appear in the results.
 pub fn compute_affected(
     graph: &PackageGraph,
     changed_files: &[String],

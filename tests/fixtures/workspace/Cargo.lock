@@ -25,6 +25,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lib-core-ext"
+version = "0.1.0"
+dependencies = [
+ "lib-core",
+]
+
+[[package]]
 name = "lib-standalone"
 version = "0.1.0"
 

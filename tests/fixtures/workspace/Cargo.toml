@@ -2,6 +2,7 @@
 members = [
     "lib-utils",
     "lib-core",
+    "lib-core-ext",
     "lib-standalone",
     "app-alpha",
     "app-beta",

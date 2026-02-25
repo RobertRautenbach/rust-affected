@@ -7,10 +7,9 @@ use std::sync::OnceLock;
 fn fixture_graph() -> &'static PackageGraph {
     static GRAPH: OnceLock<PackageGraph> = OnceLock::new();
     GRAPH.get_or_init(|| {
-        let fixture_dir: PathBuf =
-            [env!("CARGO_MANIFEST_DIR"), "tests", "fixtures", "workspace"]
-                .iter()
-                .collect();
+        let fixture_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "fixtures", "workspace"]
+            .iter()
+            .collect();
         let mut cmd = MetadataCommand::new();
         cmd.current_dir(&fixture_dir);
         PackageGraph::from_command(&mut cmd).expect("Failed to load fixture package graph")
@@ -57,7 +56,13 @@ fn change_leaf_lib_affects_all_dependents() {
     assert_eq!(result.changed_crates, vec!["lib-utils"]);
     assert_eq!(
         result.affected_library_members,
-        vec!["app-alpha", "app-beta", "lib-core", "lib-utils"]
+        vec![
+            "app-alpha",
+            "app-beta",
+            "lib-core",
+            "lib-core-ext",
+            "lib-utils"
+        ]
     );
     assert_eq!(
         result.affected_binary_members,
@@ -77,7 +82,7 @@ fn change_mid_tree_lib_affects_its_dependents() {
     assert_eq!(result.changed_crates, vec!["lib-core"]);
     assert_eq!(
         result.affected_library_members,
-        vec!["app-alpha", "app-beta", "lib-core"]
+        vec!["app-alpha", "app-beta", "lib-core", "lib-core-ext"]
     );
     assert_eq!(
         result.affected_binary_members,
@@ -160,7 +165,14 @@ fn force_trigger_match_returns_all_members() {
     assert!(result.force_all);
     assert_eq!(
         result.affected_library_members,
-        vec!["app-alpha", "app-beta", "lib-core", "lib-standalone", "lib-utils"]
+        vec![
+            "app-alpha",
+            "app-beta",
+            "lib-core",
+            "lib-core-ext",
+            "lib-standalone",
+            "lib-utils"
+        ]
     );
     assert_eq!(
         result.affected_binary_members,
@@ -206,10 +218,21 @@ fn excluded_member_removed_from_all_lists() {
     let result = compute_affected(graph, &changed, &[], &excluded);
 
     assert_eq!(result.changed_crates, vec!["lib-utils"]);
-    assert!(!result.affected_library_members.contains(&"lib-core".to_string()));
-    assert!(result.affected_library_members.contains(&"lib-utils".to_string()));
-    assert!(result.affected_library_members.contains(&"app-alpha".to_string()));
-    assert!(result.affected_library_members.contains(&"app-beta".to_string()));
+    assert!(!result
+        .affected_library_members
+        .contains(&"lib-core".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"lib-utils".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"lib-core-ext".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"app-alpha".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"app-beta".to_string()));
 }
 
 #[test]
@@ -219,7 +242,9 @@ fn excluded_binary_removed_from_binary_list() {
     let excluded = excludes(&["app-alpha"]);
     let result = compute_affected(graph, &changed, &[], &excluded);
 
-    assert!(!result.affected_binary_members.contains(&"app-alpha".to_string()));
+    assert!(!result
+        .affected_binary_members
+        .contains(&"app-alpha".to_string()));
     assert_eq!(result.affected_binary_members, vec!["app-beta"]);
 }
 
@@ -231,7 +256,9 @@ fn excluded_changed_crate_removed_from_changed_list() {
     let result = compute_affected(graph, &changed, &[], &excluded);
 
     assert!(result.changed_crates.is_empty());
-    assert!(!result.affected_library_members.contains(&"lib-utils".to_string()));
+    assert!(!result
+        .affected_library_members
+        .contains(&"lib-utils".to_string()));
 }
 
 // ── File outside any crate ──────────────────────────────────────────
@@ -258,10 +285,233 @@ fn force_all_respects_exclusions() {
     let result = compute_affected(graph, &changed, &triggers, &excluded);
 
     assert!(result.force_all);
-    assert!(!result.affected_library_members.contains(&"app-alpha".to_string()));
-    assert!(!result.affected_library_members.contains(&"lib-standalone".to_string()));
+    assert!(!result
+        .affected_library_members
+        .contains(&"app-alpha".to_string()));
+    assert!(!result
+        .affected_library_members
+        .contains(&"lib-standalone".to_string()));
+    assert_eq!(result.affected_binary_members, vec!["app-beta"]);
+}
+
+// ── Transitive dependency chain fully resolved ──────────────────────
+
+#[test]
+fn transitive_chain_fully_resolved() {
+    let graph = fixture_graph();
+    let changed = s(&["lib-utils/src/lib.rs"]);
+    let result = compute_affected(graph, &changed, &[], &no_excludes());
+
+    // lib-utils → lib-core → lib-core-ext, app-alpha, app-beta
+    // All transitive dependents must appear, not just direct ones.
+    assert!(result
+        .affected_library_members
+        .contains(&"lib-utils".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"lib-core".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"lib-core-ext".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"app-alpha".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"app-beta".to_string()));
+    assert_eq!(result.affected_library_members.len(), 5);
+}
+
+// ── Nested file path within a crate ─────────────────────────────────
+
+#[test]
+fn nested_file_path_matches_crate() {
+    let graph = fixture_graph();
+    let changed = s(&["lib-core/src/submodule/deep/file.rs"]);
+    let result = compute_affected(graph, &changed, &[], &no_excludes());
+
+    assert_eq!(result.changed_crates, vec!["lib-core"]);
+    assert_eq!(
+        result.affected_library_members,
+        vec!["app-alpha", "app-beta", "lib-core", "lib-core-ext"]
+    );
     assert_eq!(
         result.affected_binary_members,
-        vec!["app-beta"]
+        vec!["app-alpha", "app-beta"]
     );
+}
+
+// ── Leaf binary does not pull unrelated crates ──────────────────────
+
+#[test]
+fn leaf_binary_does_not_pull_unrelated() {
+    let graph = fixture_graph();
+    let changed = s(&["app-alpha/src/main.rs"]);
+    let result = compute_affected(graph, &changed, &[], &no_excludes());
+
+    assert_eq!(result.changed_crates, vec!["app-alpha"]);
+    assert_eq!(result.affected_library_members, vec!["app-alpha"]);
+    assert_eq!(result.affected_binary_members, vec!["app-alpha"]);
+    // Ensure unrelated crates are absent
+    assert!(!result
+        .affected_library_members
+        .contains(&"lib-core".to_string()));
+    assert!(!result
+        .affected_library_members
+        .contains(&"lib-utils".to_string()));
+    assert!(!result
+        .affected_library_members
+        .contains(&"lib-standalone".to_string()));
+    assert!(!result
+        .affected_library_members
+        .contains(&"lib-core-ext".to_string()));
+}
+
+// ── All crates changed at once — no duplicates ──────────────────────
+
+#[test]
+fn all_crates_changed_no_duplicates() {
+    let graph = fixture_graph();
+    let changed = s(&[
+        "lib-utils/src/lib.rs",
+        "lib-core/src/lib.rs",
+        "lib-core-ext/src/lib.rs",
+        "lib-standalone/src/lib.rs",
+        "app-alpha/src/main.rs",
+        "app-beta/src/main.rs",
+    ]);
+    let result = compute_affected(graph, &changed, &[], &no_excludes());
+
+    assert_eq!(
+        result.changed_crates,
+        vec![
+            "app-alpha",
+            "app-beta",
+            "lib-core",
+            "lib-core-ext",
+            "lib-standalone",
+            "lib-utils"
+        ]
+    );
+    // Each name appears exactly once (sorted vec guarantees no adjacent dups)
+    let mut deduped = result.changed_crates.clone();
+    deduped.dedup();
+    assert_eq!(result.changed_crates, deduped);
+
+    assert_eq!(
+        result.affected_binary_members,
+        vec!["app-alpha", "app-beta"]
+    );
+}
+
+// ── Force trigger overlapping with a normal crate change ────────────
+
+#[test]
+fn force_trigger_with_normal_change_overlap() {
+    let graph = fixture_graph();
+    let changed = s(&["lib-core/src/lib.rs", "infra/deploy.yml"]);
+    let triggers = s(&["infra/"]);
+    let result = compute_affected(graph, &changed, &triggers, &no_excludes());
+
+    assert!(result.force_all);
+    // Direct change to lib-core is still tracked
+    assert_eq!(result.changed_crates, vec!["lib-core"]);
+    // But all members appear in affected (force_all)
+    assert_eq!(
+        result.affected_library_members,
+        vec![
+            "app-alpha",
+            "app-beta",
+            "lib-core",
+            "lib-core-ext",
+            "lib-standalone",
+            "lib-utils"
+        ]
+    );
+}
+
+// ── Excluded binary absent from all lists ───────────────────────────
+
+#[test]
+fn excluded_binary_not_in_any_list() {
+    let graph = fixture_graph();
+    let changed = s(&["lib-utils/src/lib.rs"]);
+    let excluded = excludes(&["app-alpha"]);
+    let result = compute_affected(graph, &changed, &[], &excluded);
+
+    assert!(!result
+        .affected_library_members
+        .contains(&"app-alpha".to_string()));
+    assert!(!result
+        .affected_binary_members
+        .contains(&"app-alpha".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"app-beta".to_string()));
+    assert!(result
+        .affected_binary_members
+        .contains(&"app-beta".to_string()));
+}
+
+// ── Excluded mid-graph crate still traversed ────────────────────────
+
+#[test]
+fn excluded_mid_graph_crate_still_traversed() {
+    let graph = fixture_graph();
+    let changed = s(&["lib-utils/src/lib.rs"]);
+    let excluded = excludes(&["lib-core"]);
+    let result = compute_affected(graph, &changed, &[], &excluded);
+
+    // lib-core is excluded from output…
+    assert!(!result.changed_crates.contains(&"lib-core".to_string()));
+    assert!(!result
+        .affected_library_members
+        .contains(&"lib-core".to_string()));
+    // …but dependents of lib-core are still reachable via graph traversal
+    assert!(result
+        .affected_library_members
+        .contains(&"app-alpha".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"app-beta".to_string()));
+    assert!(result
+        .affected_library_members
+        .contains(&"lib-core-ext".to_string()));
+    assert!(result
+        .affected_binary_members
+        .contains(&"app-alpha".to_string()));
+    assert!(result
+        .affected_binary_members
+        .contains(&"app-beta".to_string()));
+}
+
+// ── Build script / non-src file in a crate directory ────────────────
+
+#[test]
+fn build_script_in_crate_dir_detected() {
+    let graph = fixture_graph();
+    let changed = s(&["lib-core/build.rs"]);
+    let result = compute_affected(graph, &changed, &[], &no_excludes());
+
+    assert_eq!(result.changed_crates, vec!["lib-core"]);
+    assert_eq!(
+        result.affected_binary_members,
+        vec!["app-alpha", "app-beta"]
+    );
+}
+
+// ── Path prefix false positive prevention ───────────────────────────
+
+#[test]
+fn path_prefix_no_false_positive() {
+    let graph = fixture_graph();
+    let changed = s(&["lib-core-ext/src/lib.rs"]);
+    let result = compute_affected(graph, &changed, &[], &no_excludes());
+
+    // Only lib-core-ext itself should be in changed_crates, NOT lib-core
+    assert_eq!(result.changed_crates, vec!["lib-core-ext"]);
+    assert!(!result.changed_crates.contains(&"lib-core".to_string()));
+    // lib-core-ext has no reverse dependents, so affected is just itself
+    assert_eq!(result.affected_library_members, vec!["lib-core-ext"]);
+    assert!(result.affected_binary_members.is_empty());
 }
