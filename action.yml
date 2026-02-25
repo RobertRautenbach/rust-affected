@@ -96,11 +96,37 @@ runs:
     - name: Compute affected packages
       id: affected
       if: steps.changed-files.outputs.all_changed_files != ''
-      uses: docker://ghcr.io/robertrautenbach/rust-affected:latest
+      shell: bash
       env:
         CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         FORCE_TRIGGERS: ${{ inputs.force_triggers }}
         EXCLUDED_MEMBERS: ${{ inputs.excluded_members }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        # Resolve Docker image tag from the action's pinned git ref.
+        # e.g. @v1.2.3 → v1.2.3, @v1 → v1, @main → latest
+        TAG="${ACTION_REF:-latest}"
+        if [[ "$TAG" == "main" || "$TAG" == "master" ]]; then
+          TAG="latest"
+        fi
+
+        IMAGE="ghcr.io/robertrautenbach/rust-affected:${TAG}"
+        echo "Pulling ${IMAGE}"
+
+        # Run without GITHUB_OUTPUT so the binary prints JSON to stdout.
+        OUTPUT=$(docker run --rm \
+          -e CHANGED_FILES \
+          -e FORCE_TRIGGERS \
+          -e EXCLUDED_MEMBERS \
+          -v "${GITHUB_WORKSPACE}:/github/workspace" \
+          -w /github/workspace \
+          "$IMAGE")
+
+        # Parse JSON stdout and set step outputs.
+        echo "changed_crates=$(echo "$OUTPUT" | jq -c '.changed_crates')" >> "$GITHUB_OUTPUT"
+        echo "affected_library_members=$(echo "$OUTPUT" | jq -c '.affected_library_members')" >> "$GITHUB_OUTPUT"
+        echo "affected_binary_members=$(echo "$OUTPUT" | jq -c '.affected_binary_members')" >> "$GITHUB_OUTPUT"
+        echo "force_all=$(echo "$OUTPUT" | jq -r '.force_all')" >> "$GITHUB_OUTPUT"
 
     - name: Write job summary
       if: always()
