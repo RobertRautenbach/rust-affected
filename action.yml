@@ -1,9 +1,7 @@
 name: rust-affected
 description: >
-  Detects changed files since a given base SHA and computes affected Cargo
-  workspace members and deployable binaries via the Cargo dependency graph.
-  Only packages that are members of the workspace are reported; path
-  dependencies outside the workspace root are not tracked.
+  Detects changed files and computes affected Cargo
+  workspace members via the Cargo dependency graph.
 author: Robert Rautenbach
 branding:
   icon: git-branch
