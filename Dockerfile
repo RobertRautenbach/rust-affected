@@ -28,7 +28,7 @@ RUN TARGET="$(cat /rust-target)" && \
     strip "target/$TARGET/release/rust-affected" && \
     cp "target/$TARGET/release/rust-affected" /rust-affected
 
-FROM alpine:3.21
-RUN apk add --no-cache git cargo
+FROM rust:1-alpine3.23
+RUN apk add --no-cache git
 COPY --from=builder /rust-affected /usr/local/bin/rust-affected
 ENTRYPOINT ["rust-affected", "--github-actions"]
