@@ -2,7 +2,7 @@ name: rust-affected
 description: >
   Detects changed files since the last push and computes affected packages
   and services via the Cargo dependency graph.
-
+author: Robert Rautenbach
 branding:
   icon: git-branch
   color: orange
@@ -59,3 +59,38 @@ runs:
       env:
         CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         FORCE_TRIGGERS: ${{ inputs.force_triggers }}
+
+    - name: Write job summary
+      if: always()
+      shell: bash
+      run: |
+        CHANGED='${{ steps.no-changes.outputs.changed_crates || steps.affected.outputs.changed_crates }}'
+        LIBRARIES='${{ steps.no-changes.outputs.affected_library_members || steps.affected.outputs.affected_library_members }}'
+        BINARIES='${{ steps.no-changes.outputs.affected_binary_members || steps.affected.outputs.affected_binary_members }}'
+        FORCE='${{ steps.no-changes.outputs.force_all || steps.affected.outputs.force_all }}'
+
+        fmt_list() {
+          echo "$1" | tr -d '[]"' | tr ',' '\n' | sed '/^$/d' | sed 's/.*$/- `&`/' || echo "_none_"
+        }
+
+        FORCE_NOTICE=""
+        [ "$FORCE" = "true" ] && FORCE_NOTICE=$'\n> ⚠️ **Force all** — a global trigger file changed, entire workspace affected.\n'
+
+        cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+        ## rust-affected
+        ${FORCE_NOTICE}
+        | | Crates |
+        |---|---|
+        | **Changed** | $(echo "$CHANGED" | tr -d '[]"' | tr ',' ' ') |
+        | **Affected libraries** | $(echo "$LIBRARIES" | tr -d '[]"' | tr ',' ' ') |
+        | **Affected binaries** | $(echo "$BINARIES" | tr -d '[]"' | tr ',' ' ') |
+
+        ### Changed crates
+        $(fmt_list "$CHANGED")
+
+        ### Affected library members
+        $(fmt_list "$LIBRARIES")
+
+        ### Affected binary members
+        $(fmt_list "$BINARIES")
+        EOF
