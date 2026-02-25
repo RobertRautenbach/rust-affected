@@ -1,8 +1,7 @@
-use globset::{Glob, GlobSetBuilder};
 use guppy::{graph::PackageGraph, MetadataCommand};
+use rust_affected::compute_affected;
 use std::env;
 use std::io::Write;
-use std::path::Path;
 
 fn main() {
     let changed_files: Vec<String> = env::var("CHANGED_FILES")
@@ -16,108 +15,25 @@ fn main() {
         return;
     }
 
-    // FORCE_TRIGGERS env var; entries are newline- or space-separated glob patterns.
-    // Trailing-slash entries (e.g. "infra/") are normalised to "infra/**" so they
-    // match all files inside that directory. Patterns support *, **, and ? via globset.
     let force_triggers: Vec<String> = env::var("FORCE_TRIGGERS")
         .map(|v| v.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
 
-    let force_all =
-        if force_triggers.is_empty() {
-            false
-        } else {
-            let mut builder = GlobSetBuilder::new();
-            for trigger in &force_triggers {
-                let pattern = if trigger.ends_with('/') {
-                    format!("{}**", trigger)
-                } else {
-                    trigger.clone()
-                };
-                builder.add(Glob::new(&pattern).unwrap_or_else(|e| {
-                    panic!("Invalid force_trigger glob pattern {pattern:?}: {e}")
-                }));
-            }
-            let globset = builder
-                .build()
-                .expect("Failed to build force_triggers glob set");
-            changed_files.iter().any(|f| globset.is_match(f))
-        };
+    let excluded: std::collections::HashSet<String> = env::var("EXCLUDED_MEMBERS")
+        .map(|v| v.split_whitespace().map(String::from).collect())
+        .unwrap_or_default();
 
     let mut cmd = MetadataCommand::new();
     let graph = PackageGraph::from_command(&mut cmd)
         .expect("Failed to load package graph. Is this a Cargo workspace?");
 
-    let workspace_root = graph.workspace().root().as_std_path();
-
-    let mut direct_ids = Vec::new();
-    for pkg in graph.workspace().iter() {
-        let pkg_dir = pkg
-            .manifest_path()
-            .parent()
-            .expect("manifest has no parent")
-            .as_std_path();
-
-        let pkg_dir = pkg_dir.strip_prefix(workspace_root).unwrap_or(pkg_dir);
-
-        if changed_files
-            .iter()
-            .any(|f| Path::new(f).starts_with(pkg_dir))
-        {
-            direct_ids.push(pkg.id().clone());
-        }
-    }
-
-    let affected_set = if force_all {
-        graph.query_workspace().resolve()
-    } else {
-        graph
-            .query_reverse(direct_ids.iter())
-            .expect("reverse query failed")
-            .resolve()
-    };
-
-    let workspace = graph.workspace();
-
-    // EXCLUDED_MEMBERS env var: space- or newline-separated crate names to
-    // strip from all three output lists.
-    let excluded: std::collections::HashSet<String> = env::var("EXCLUDED_MEMBERS")
-        .map(|v| v.split_whitespace().map(String::from).collect())
-        .unwrap_or_default();
-
-    let mut changed_crates: Vec<String> = direct_ids
-        .iter()
-        .filter_map(|id| graph.metadata(id).ok())
-        .filter(|pkg| workspace.contains_name(pkg.name()) && !excluded.contains(pkg.name()))
-        .map(|pkg| pkg.name().to_string())
-        .collect();
-    changed_crates.sort();
-
-    let mut affected_library_members: Vec<String> = affected_set
-        .packages(guppy::graph::DependencyDirection::Forward)
-        .filter(|pkg| workspace.contains_name(pkg.name()) && !excluded.contains(pkg.name()))
-        .map(|pkg| pkg.name().to_string())
-        .collect();
-    affected_library_members.sort();
-
-    let mut affected_binary_members: Vec<String> = affected_set
-        .packages(guppy::graph::DependencyDirection::Forward)
-        .filter(|pkg| {
-            workspace.contains_name(pkg.name())
-                && !excluded.contains(pkg.name())
-                && pkg
-                    .build_targets()
-                    .any(|t| t.kind() == guppy::graph::BuildTargetKind::Binary)
-        })
-        .map(|pkg| pkg.name().to_string())
-        .collect();
-    affected_binary_members.sort();
+    let result = compute_affected(&graph, &changed_files, &force_triggers, &excluded);
 
     emit_output(
-        force_all,
-        changed_crates,
-        affected_library_members,
-        affected_binary_members,
+        result.force_all,
+        result.changed_crates,
+        result.affected_library_members,
+        result.affected_binary_members,
     );
 }
 

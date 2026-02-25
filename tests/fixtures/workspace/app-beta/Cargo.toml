@@ -1,0 +1,8 @@
+[package]
+name = "app-beta"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lib-core = { path = "../lib-core" }
+lib-standalone = { path = "../lib-standalone" }

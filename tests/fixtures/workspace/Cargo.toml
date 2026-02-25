@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "lib-utils",
+    "lib-core",
+    "lib-standalone",
+    "app-alpha",
+    "app-beta",
+]
+resolver = "2"
