@@ -36,12 +36,11 @@ jobs:
 
       - name: Compute next version
         id: version
-        uses: mathieudutour/github-tag-action@v6.2
+        uses: lajosbencz/actions-manual-bump@3d4f105e5aae2cf18ebcdea63e9b0b773ea10822 # v1.0.0
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          release_branches: main
-          default_bump: ${{ inputs.bump }}
-          dry_run: true
+          release_type: ${{ inputs.bump }}
+          push: "false"
+          prefix_with_v: "true"
 
       - name: Set lowercase owner
         run: |
