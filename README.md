@@ -4,8 +4,8 @@ A GitHub Action that detects which packages in a Rust workspace are affected by 
 
 Given a set of changed files, it determines:
 - **`changed_crates`** — packages with files directly modified
-- **`affected_library_members`** — those packages plus any workspace members that (transitively) depend on them
-- **`affected_binary_members`** — the subset of affected packages that have a binary target
+- **`affected_library_members`** — pure library crates that are changed or (transitively) depend on a changed crate; binary crates are excluded from this list
+- **`affected_binary_members`** — affected crates that have a binary target; mutually exclusive with `affected_library_members`
 - **`force_all`** — whether a configured force-trigger file changed, meaning the entire workspace should be considered affected
 
 ## Usage
@@ -54,8 +54,8 @@ jobs:
 | Output | Description |
 |---|---|
 | `changed_crates` | JSON array of crate names with directly changed files |
-| `affected_library_members` | JSON array of all affected workspace members (changed + transitive dependents) |
-| `affected_binary_members` | JSON array of affected workspace members that have a binary target |
+| `affected_library_members` | JSON array of affected workspace members that are pure library crates (no binary target) |
+| `affected_binary_members` | JSON array of affected workspace members that have a binary target; mutually exclusive with `affected_library_members` |
 | `force_all` | `"true"` if a force-trigger file changed, otherwise `"false"` |
 
 ## How `base_sha` works
