@@ -63,6 +63,10 @@ pub fn check_force_triggers(changed_files: &[String], force_triggers: &[String])
 
 /// Compute which workspace crates are affected by a set of changed files.
 ///
+/// `affected_library_members` and `affected_binary_members` are mutually
+/// exclusive: a crate with a binary target appears only in `affected_binary_members`,
+/// while pure library crates appear only in `affected_library_members`.
+///
 /// `excluded` filters crate names from all three output lists (changed_crates,
 /// affected_library_members, affected_binary_members) but does **not** prune the
 /// dependency graph traversal. An excluded crate is still traversed when resolving
@@ -142,6 +146,9 @@ pub fn compute_affected(
         .filter(|pkg| {
             workspace.contains_name(pkg.name())
                 && !is_excluded(pkg.name(), &relative_dir(pkg), excluded)
+                && !pkg
+                    .build_targets()
+                    .any(|t| matches!(t.id(), guppy::graph::BuildTargetId::Binary(_)))
         })
         .map(|pkg| pkg.name().to_string())
         .collect();
