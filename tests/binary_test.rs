@@ -190,7 +190,8 @@ fn env_excluded_members_space_separated() {
     assert!(!affected.contains(&"lib-core".to_string()));
     assert!(!affected.contains(&"app-alpha".to_string()));
     assert!(affected.contains(&"lib-utils".to_string()));
-    assert!(affected.contains(&"app-beta".to_string()));
+    // app-beta is a binary crate — it must not appear in affected_library_members
+    assert!(!affected.contains(&"app-beta".to_string()));
 }
 
 #[test]
@@ -215,7 +216,8 @@ fn env_excluded_members_unset_means_no_exclusions() {
     let affected: Vec<String> =
         serde_json::from_value(json["affected_library_members"].clone()).unwrap();
     assert!(affected.contains(&"lib-core".to_string()));
-    assert!(affected.contains(&"app-alpha".to_string()));
+    // app-alpha is a binary crate — it must not appear in affected_library_members
+    assert!(!affected.contains(&"app-alpha".to_string()));
 }
 
 // ── GITHUB_OUTPUT file-based output ─────────────────────────────────
@@ -315,7 +317,8 @@ fn all_env_vars_together() {
     assert!(!affected.contains(&"app-alpha".to_string()));
     assert!(!affected.contains(&"lib-core-ext".to_string()));
     assert!(affected.contains(&"lib-core".to_string()));
-    assert!(affected.contains(&"app-beta".to_string()));
+    // app-beta is a binary crate — it must not appear in affected_library_members
+    assert!(!affected.contains(&"app-beta".to_string()));
 
     let binaries: Vec<String> =
         serde_json::from_value(json["affected_binary_members"].clone()).unwrap();
