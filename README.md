@@ -24,7 +24,7 @@ jobs:
 
       - name: Detect affected packages
         id: affected
-        uses: robertrautenbach/rust-affected@v3.0.2
+        uses: robertrautenbach/rust-affected@v3.0.3
         with:
           force_triggers: |
             Cargo.lock
@@ -73,13 +73,13 @@ The diff base is chosen automatically depending on the event type:
 Pass an explicit `base_sha` to compare against any commit:
 
 ```yaml
-- uses: robertrautenbach/rust-affected@v3.0.2
+- uses: robertrautenbach/rust-affected@v3.0.3
   with:
     base_sha: ${{ github.event.before }}   # always use previous-push diff, even on PRs
 ```
 
 ```yaml
-- uses: robertrautenbach/rust-affected@v3.0.2
+- uses: robertrautenbach/rust-affected@v3.0.3
   with:
     base_sha: ${{ github.sha }}~1          # always compare to the immediate parent
 ```
