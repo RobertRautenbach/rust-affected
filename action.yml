@@ -40,6 +40,15 @@ inputs:
       tooling or helper crates that should never be deployed.
       If omitted, no members are excluded.
     required: false
+  tag:
+    description: >
+      Docker image tag to pull. When the action is used directly
+      (e.g. robertrautenbach/rust-affected@v3), github.action_ref resolves
+      automatically so you don't need this. When the action is called from
+      inside a composite action, github.action_ref is empty and falls back
+      to "latest". Set this explicitly in that case (e.g. tag: "v3").
+    required: false
+    default: ""
 
 outputs:
   changed_crates:
@@ -104,11 +113,12 @@ runs:
         CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         FORCE_TRIGGERS: ${{ inputs.force_triggers }}
         EXCLUDED_MEMBERS: ${{ inputs.excluded_members }}
+        INPUT_TAG: ${{ inputs.tag }}
         ACTION_REF: ${{ github.action_ref }}
       run: |
-        # Resolve Docker image tag from the action's pinned git ref.
-        # e.g. @v1.2.3 → v1.2.3, @v1 → v1, @main → latest
-        TAG="${ACTION_REF:-latest}"
+        # Resolve Docker image tag.
+        # Priority: explicit input.tag > github.action_ref > "latest"
+        TAG="${INPUT_TAG:-${ACTION_REF:-latest}}"
         if [[ "$TAG" == "main" || "$TAG" == "master" ]]; then
           TAG="latest"
         fi
