@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1.94.0-slim-bookworm AS chef
+FROM --platform=$BUILDPLATFORM rust:1.94.1-slim-bookworm AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
       musl-tools \
       gcc-aarch64-linux-gnu \
@@ -33,7 +33,7 @@ RUN TARGET="$(cat /rust-target)" && \
     cargo build --release --target "$TARGET" -p rust-affected && \
     cp "target/$TARGET/release/rust-affected" /rust-affected
 
-FROM rust:1.94.0-alpine3.23
+FROM rust:1.94.1-alpine3.23
 RUN apk add --no-cache git
 
 LABEL org.opencontainers.image.title="rust-affected"
