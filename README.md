@@ -138,7 +138,7 @@ v4 is a breaking change. The action no longer detects changed files itself — y
 
 **Before (v3):**
 ```yaml
-- uses: robertrautenbach/rust-affected@v3
+- uses: robertrautenbach/rust-affected@v4.0.0
 ```
 
 **After (v4):**
