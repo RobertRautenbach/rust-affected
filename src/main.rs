@@ -66,4 +66,75 @@ fn emit_output(force: bool, changed: Vec<String>, affected: Vec<String>, binarie
             })
         );
     }
+
+    // Write a job summary when running inside GitHub Actions.
+    if let Ok(path) = env::var("GITHUB_STEP_SUMMARY") {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("Failed to open GITHUB_STEP_SUMMARY");
+
+        let fmt_inline = |items: &[String]| -> String {
+            if items.is_empty() {
+                String::new()
+            } else {
+                items
+                    .iter()
+                    .map(|s| format!("`{s}`"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+        };
+
+        let fmt_list = |items: &[String]| -> String {
+            if items.is_empty() {
+                "_none_".to_string()
+            } else {
+                items
+                    .iter()
+                    .map(|s| format!("- `{s}`"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
+
+        if force {
+            writeln!(
+                file,
+                "> [!WARNING]\n> **Force all** — a global trigger file changed, entire workspace affected.\n"
+            )
+            .unwrap();
+        }
+
+        writeln!(file, "## rust-affected\n").unwrap();
+        writeln!(file, "| | Crates |").unwrap();
+        writeln!(file, "|---|---|").unwrap();
+        writeln!(file, "| **Changed** | {} |", fmt_inline(&changed)).unwrap();
+        writeln!(
+            file,
+            "| **Affected libraries** | {} |",
+            fmt_inline(&affected)
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "| **Affected binaries** | {} |",
+            fmt_inline(&binaries)
+        )
+        .unwrap();
+        writeln!(file).unwrap();
+        writeln!(file, "### Changed crates\n{}", fmt_list(&changed)).unwrap();
+        writeln!(
+            file,
+            "\n### Affected library members\n{}",
+            fmt_list(&affected)
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "\n### Affected binary members\n{}",
+            fmt_list(&binaries)
+        )
+        .unwrap();
+    }
 }

@@ -1,24 +1,20 @@
 name: rust-affected
 description: >
-  Detects changed files and computes affected Cargo
-  workspace members via the Cargo dependency graph.
+  Computes affected Cargo workspace members from a set of changed files
+  via the Cargo dependency graph.
 author: Robert Rautenbach
 branding:
   icon: git-branch
   color: orange
 
 inputs:
-  base_sha:
+  changed_files:
     description: >
-      The SHA to compare against.
-      On pull_request events this defaults to the base branch tip (github.event.pull_request.base.sha),
-      so every push to a PR branch is always diffed against main regardless of how many commits
-      have been pushed.
-      On push events (e.g. a direct push to main) it falls back to github.event.before,
-      which is the commit that was HEAD before the push.
-      Override this input to use a different base.
-    required: false
-    default: ${{ github.event.pull_request.base.sha || github.event.before }}
+      Space- or newline-separated list of changed file paths relative to the
+      workspace root. Typically produced by a prior step such as
+      `git diff --name-only`, `tj-actions/changed-files`, or
+      `dorny/paths-filter`.
+    required: true
   force_triggers:
     description: >
       Space- or newline-separated list of glob patterns that trigger a full rebuild of the entire
@@ -40,131 +36,21 @@ inputs:
       tooling or helper crates that should never be deployed.
       If omitted, no members are excluded.
     required: false
+
 outputs:
   changed_crates:
     description: JSON array of crates with directly changed files
-    value: ${{ steps.no-changes.outputs.changed_crates || steps.affected.outputs.changed_crates }}
   affected_library_members:
     description: JSON array of all affected workspace members (including transitive dependents)
-    value: ${{ steps.no-changes.outputs.affected_library_members || steps.affected.outputs.affected_library_members }}
   affected_binary_members:
     description: JSON array of affected deployable binaries (services)
-    value: ${{ steps.no-changes.outputs.affected_binary_members || steps.affected.outputs.affected_binary_members }}
   force_all:
     description: Whether a force-trigger file changed
-    value: ${{ steps.no-changes.outputs.force_all || steps.affected.outputs.force_all }}
 
 runs:
-  using: composite
-  steps:
-    - name: Resolve base SHA
-      id: resolve-sha
-      shell: bash
-      run: |
-        SHA="${{ inputs.base_sha }}"
-        NULL_SHA="0000000000000000000000000000000000000000"
-        if [[ -z "$SHA" || "$SHA" == "$NULL_SHA" ]]; then
-          # SHA is absent or null — this happens on the very first push to a new
-          # branch, or on a force-push that has no prior event SHA.
-          # Fall back to the merge-base with the default branch so we only diff
-          # what is new; if the remote is unavailable fall back to the initial commit.
-          RESOLVED=$(
-            git merge-base HEAD origin/main 2>/dev/null ||
-            git merge-base HEAD origin/master 2>/dev/null ||
-            git rev-list --max-parents=0 HEAD
-          )
-          echo "sha=$RESOLVED" >> "$GITHUB_OUTPUT"
-        else
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-        fi
-
-    - name: Get changed files
-      id: changed-files
-      uses: tj-actions/changed-files@v47
-      with:
-        separator: " "
-        base_sha: ${{ steps.resolve-sha.outputs.sha }}
-
-    - name: No changed files detected
-      id: no-changes
-      if: steps.changed-files.outputs.all_changed_files == ''
-      shell: bash
-      run: |
-        echo "changed_crates=[]" >> "$GITHUB_OUTPUT"
-        echo "affected_library_members=[]" >> "$GITHUB_OUTPUT"
-        echo "affected_binary_members=[]" >> "$GITHUB_OUTPUT"
-        echo "force_all=false" >> "$GITHUB_OUTPUT"
-
-    - name: Compute affected packages
-      id: affected
-      if: steps.changed-files.outputs.all_changed_files != ''
-      shell: bash
-      env:
-        CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
-        FORCE_TRIGGERS: ${{ inputs.force_triggers }}
-        EXCLUDED_MEMBERS: ${{ inputs.excluded_members }}
-        ACTION_PATH: ${{ github.action_path }}
-      run: |
-        # Extract the git ref from the action's download path.
-        # GitHub downloads actions to: _actions/{owner}/{repo}/{ref}/
-        # so the last path segment is the ref (e.g. "v3", "v3.0.1").
-        TAG="$(basename "$ACTION_PATH")"
-        if [[ -z "$TAG" || "$TAG" == "main" || "$TAG" == "master" ]]; then
-          TAG="latest"
-        fi
-        if [[ "$TAG" == "main" || "$TAG" == "master" ]]; then
-          TAG="latest"
-        fi
-
-        IMAGE="ghcr.io/robertrautenbach/rust-affected:${TAG}"
-        echo "Pulling ${IMAGE}"
-
-        # Run without GITHUB_OUTPUT so the binary prints JSON to stdout.
-        OUTPUT=$(docker run --rm \
-          -e CHANGED_FILES \
-          -e FORCE_TRIGGERS \
-          -e EXCLUDED_MEMBERS \
-          -v "${GITHUB_WORKSPACE}:/github/workspace" \
-          -w /github/workspace \
-          "$IMAGE")
-
-        # Parse JSON stdout and set step outputs.
-        echo "changed_crates=$(echo "$OUTPUT" | jq -c '.changed_crates')" >> "$GITHUB_OUTPUT"
-        echo "affected_library_members=$(echo "$OUTPUT" | jq -c '.affected_library_members')" >> "$GITHUB_OUTPUT"
-        echo "affected_binary_members=$(echo "$OUTPUT" | jq -c '.affected_binary_members')" >> "$GITHUB_OUTPUT"
-        echo "force_all=$(echo "$OUTPUT" | jq -r '.force_all')" >> "$GITHUB_OUTPUT"
-
-    - name: Write job summary
-      if: always()
-      shell: bash
-      run: |
-        CHANGED='${{ steps.no-changes.outputs.changed_crates || steps.affected.outputs.changed_crates }}'
-        LIBRARIES='${{ steps.no-changes.outputs.affected_library_members || steps.affected.outputs.affected_library_members }}'
-        BINARIES='${{ steps.no-changes.outputs.affected_binary_members || steps.affected.outputs.affected_binary_members }}'
-        FORCE='${{ steps.no-changes.outputs.force_all || steps.affected.outputs.force_all }}'
-
-        fmt_list() {
-          echo "$1" | tr -d '[]"' | tr ',' '\n' | sed '/^$/d' | sed 's/.*$/- `&`/' || echo "_none_"
-        }
-
-        FORCE_NOTICE=""
-        [ "$FORCE" = "true" ] && FORCE_NOTICE=$'\n ⚠️ **Force all** — a global trigger file changed, entire workspace affected.\n'
-
-        cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-        ## rust-affected
-        ${FORCE_NOTICE}
-        | | Crates |
-        |---|---|
-        | **Changed** | $(echo "$CHANGED" | tr -d '[]"' | tr ',' ' ') |
-        | **Affected libraries** | $(echo "$LIBRARIES" | tr -d '[]"' | tr ',' ' ') |
-        | **Affected binaries** | $(echo "$BINARIES" | tr -d '[]"' | tr ',' ' ') |
-
-        ### Changed crates
-        $(fmt_list "$CHANGED")
-
-        ### Affected library members
-        $(fmt_list "$LIBRARIES")
-
-        ### Affected binary members
-        $(fmt_list "$BINARIES")
-        EOF
+  using: docker
+  image: 'docker://ghcr.io/robertrautenbach/rust-affected:v4.0.0'
+  env:
+    CHANGED_FILES: ${{ inputs.changed_files }}
+    FORCE_TRIGGERS: ${{ inputs.force_triggers }}
+    EXCLUDED_MEMBERS: ${{ inputs.excluded_members }}

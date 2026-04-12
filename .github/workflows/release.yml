@@ -99,12 +99,14 @@ jobs:
           git push origin ${{ steps.version.outputs.new_tag }}
           git push origin $MAJOR_TAG --force
 
-      - name: Update README version references
+      - name: Update version references
         run: |
           NEW_TAG="${{ steps.version.outputs.new_tag }}"
+          # Update @ref in README and :tag in action.yml
           sed -i "s|robertrautenbach/rust-affected@[^ '\"]*|robertrautenbach/rust-affected@${NEW_TAG}|g" README.md
-          git add README.md
-          git diff --cached --quiet || git commit -m "docs: update README example to ${NEW_TAG}"
+          sed -i "s|rust-affected:[^ '\"]*|rust-affected:${NEW_TAG}|g" action.yml
+          git add README.md action.yml
+          git diff --cached --quiet || git commit -m "chore: update version references to ${NEW_TAG}"
           git push origin HEAD:main
 
       - name: Create GitHub Release
@@ -114,3 +116,50 @@ jobs:
           name: ${{ steps.version.outputs.new_tag }}
           generate_release_notes: true
           make_latest: true
+
+      - name: Rollback on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_TAG="${{ steps.version.outputs.new_tag }}"
+          MAJOR_TAG="${{ env.MAJOR_TAG }}"
+          OWNER="${{ env.OWNER }}"
+
+          echo "::warning::Release failed — rolling back artifacts"
+
+          # 1. Revert the version-update commit if it was pushed to main
+          git fetch origin main
+          LATEST_MSG=$(git log origin/main -1 --format='%s' 2>/dev/null || true)
+          if echo "$LATEST_MSG" | grep -q "$NEW_TAG"; then
+            echo "Reverting version-update commit on main..."
+            git checkout origin/main
+            git revert HEAD --no-edit
+            git push origin HEAD:main
+          fi
+
+          # 2. Delete git tags if they were pushed
+          echo "Deleting git tag ${NEW_TAG} (if exists)..."
+          git push origin ":refs/tags/${NEW_TAG}" 2>/dev/null || true
+          echo "Deleting git tag ${MAJOR_TAG} (if exists)..."
+          git push origin ":refs/tags/${MAJOR_TAG}" 2>/dev/null || true
+
+          # 3. Best-effort delete Docker image tags from GHCR
+          for TAG_TO_DELETE in "$NEW_TAG" "$MAJOR_TAG" ; do
+            echo "Deleting Docker tag ${TAG_TO_DELETE} (if exists)..."
+            # Try user endpoint first, then org endpoint
+            for API_PREFIX in "users/${OWNER}" "orgs/${OWNER}" ; do
+              VERSION_ID=$(gh api \
+                "${API_PREFIX}/packages/container/rust-affected/versions" \
+                --jq ".[] | select(.metadata.container.tags[] == \"${TAG_TO_DELETE}\") | .id" \
+                2>/dev/null || true)
+              if [ -n "$VERSION_ID" ]; then
+                gh api --method DELETE \
+                  "${API_PREFIX}/packages/container/rust-affected/versions/${VERSION_ID}" \
+                  2>/dev/null || true
+                break
+              fi
+            done
+          done
+
+          echo "::error::Rollback complete. Review the state before retrying."

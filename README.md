@@ -1,6 +1,6 @@
 # rust-affected
 
-A GitHub Action that detects which packages in a Rust workspace are affected by a push, using the Cargo dependency graph.
+A GitHub Action that detects which packages in a Rust workspace are affected by a set of changed files, using the Cargo dependency graph.
 
 Given a set of changed files, it determines:
 - **`changed_crates`** — packages with files directly modified
@@ -19,13 +19,16 @@ jobs:
       force_all: ${{ steps.affected.outputs.force_all }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed
+        uses: tj-actions/changed-files@v47
 
       - name: Detect affected packages
         id: affected
-        uses: robertrautenbach/rust-affected@v3.0.3
+        uses: robertrautenbach/rust-affected@v4.0.0
         with:
+          changed_files: ${{ steps.changed.outputs.all_changed_files }}
           force_triggers: |
             Cargo.lock
             Cargo.toml
@@ -41,11 +44,76 @@ jobs:
       - run: echo "Deploying my-service"
 ```
 
+## Example output
+
+Imagine a workspace where `lib-utils` is a shared library depended on by `lib-core`, `lib-core-ext`, `app-alpha`, `app-beta`, and `tool-alpha`. A PR that changes `lib-utils/src/lib.rs` produces:
+
+```
+changed_crates=["lib-utils"]
+affected_library_members=["lib-core","lib-core-ext","lib-utils"]
+affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+force_all=false
+```
+
+The action also writes a job summary to the workflow run:
+
+> ## rust-affected
+>
+> | | Crates |
+> |---|---|
+> | **Changed** | `lib-utils` |
+> | **Affected libraries** | `lib-core` `lib-core-ext` `lib-utils` |
+> | **Affected binaries** | `app-alpha` `app-beta` `tool-alpha` |
+>
+> ### Changed crates
+> - `lib-utils`
+>
+> ### Affected library members
+> - `lib-core`
+> - `lib-core-ext`
+> - `lib-utils`
+>
+> ### Affected binary members
+> - `app-alpha`
+> - `app-beta`
+> - `tool-alpha`
+
+## Getting changed files
+
+You provide the list of changed files — here are common approaches:
+
+### tj-actions/changed-files
+
+```yaml
+- name: Get changed files
+  id: changed
+  uses: tj-actions/changed-files@v47
+
+- uses: robertrautenbach/rust-affected@v4.0.0
+  with:
+    changed_files: ${{ steps.changed.outputs.all_changed_files }}
+```
+
+### git diff (no extra dependencies)
+
+```yaml
+- name: Get changed files
+  id: changed
+  run: |
+    echo "files=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+- uses: robertrautenbach/rust-affected@v4.0.0
+  with:
+    changed_files: ${{ steps.changed.outputs.files }}
+```
+
+> **Note:** Requires `fetch-depth: 0` on `actions/checkout` so the base SHA is available locally.
+
 ## Inputs
 
 | Input | Required | Description |
 |---|---|---|
-| `base_sha` | No | The SHA to diff against. On `pull_request` events defaults to `github.event.pull_request.base.sha` (the base branch tip), so every push to a PR always diffs against main. On `push` events defaults to `github.event.before` (the commit that was HEAD before the push). Override to use any SHA. |
+| `changed_files` | **Yes** | Space- or newline-separated list of changed file paths relative to the workspace root. |
 | `force_triggers` | No | Space- or newline-separated list of glob patterns that trigger a full rebuild when any matching file changes. Supports `*`, `**`, and `?`. A bare name (e.g. `Cargo.lock`) matches that exact path only. A trailing slash (e.g. `.github/`) matches the directory and everything inside it. Full globs are also supported (e.g. `**/*.sql`, `migrations/**`). If omitted, `force_all` is never set. |
 | `excluded_members` | No | Space- or newline-separated list of workspace member names **or path prefixes** to exclude from all outputs. A plain name (e.g. `my-tool`) matches the crate name directly. An entry containing `/` is matched against the crate's directory relative to the workspace root: a trailing slash (e.g. `tools/`) excludes every crate under that directory, while an exact relative path (e.g. `tools/my-tool`) excludes only that crate. Useful for internal tooling or helper crates that should never appear in CI results. If omitted, no members are excluded. |
 
@@ -58,29 +126,28 @@ jobs:
 | `affected_binary_members` | JSON array of affected workspace members that have a binary target; mutually exclusive with `affected_library_members` |
 | `force_all` | `"true"` if a force-trigger file changed, otherwise `"false"` |
 
-## How `base_sha` works
+## Migrating from v3
 
-The diff base is chosen automatically depending on the event type:
+v4 is a breaking change. The action no longer detects changed files itself — you provide them via the `changed_files` input.
 
-| Scenario | Default base |
+| v3 | v4 |
 |---|---|
-| Push to a PR branch (any push, not just the first) | `github.event.pull_request.base.sha` — the tip of the base branch. Every push to the PR is always diffed against main, so no changes are ever missed across multiple pushes. |
-| Direct push to main (or any branch outside a PR) | `github.event.before` — the commit that was HEAD before the push, giving an exact diff of only what landed in this push. |
-| First push to a new branch / force-push (null SHA) | Falls back to `git merge-base HEAD origin/main` so the diff covers everything introduced on the branch. |
+| `base_sha` input (optional) | Removed — compute your own diff |
+| Changed files detected automatically | `changed_files` input (**required**) |
+| All outputs | Unchanged |
 
-### Overriding the default
-
-Pass an explicit `base_sha` to compare against any commit:
-
+**Before (v3):**
 ```yaml
-- uses: robertrautenbach/rust-affected@v3.0.3
-  with:
-    base_sha: ${{ github.event.before }}   # always use previous-push diff, even on PRs
+- uses: robertrautenbach/rust-affected@v3
 ```
 
+**After (v4):**
 ```yaml
-- uses: robertrautenbach/rust-affected@v3.0.3
-  with:
-    base_sha: ${{ github.sha }}~1          # always compare to the immediate parent
-```
+- name: Get changed files
+  id: changed
+  uses: tj-actions/changed-files@v47
 
+- uses: robertrautenbach/rust-affected@v4.0.0
+  with:
+    changed_files: ${{ steps.changed.outputs.all_changed_files }}
+```
