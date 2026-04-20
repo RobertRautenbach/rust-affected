@@ -49,7 +49,7 @@ outputs:
 
 runs:
   using: docker
-  image: 'docker://ghcr.io/robertrautenbach/rust-affected:v4.0.0'
+  image: 'docker://ghcr.io/robertrautenbach/rust-affected:v4.0.1'
   env:
     CHANGED_FILES: ${{ inputs.changed_files }}
     FORCE_TRIGGERS: ${{ inputs.force_triggers }}
