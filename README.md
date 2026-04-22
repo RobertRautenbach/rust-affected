@@ -26,7 +26,7 @@ jobs:
 
       - name: Detect affected packages
         id: affected
-        uses: robertrautenbach/rust-affected@v4.0.1
+        uses: robertrautenbach/rust-affected@v4.0.2
         with:
           changed_files: ${{ steps.changed.outputs.all_changed_files }}
           force_triggers: |
@@ -89,7 +89,7 @@ You provide the list of changed files — here are common approaches:
   id: changed
   uses: tj-actions/changed-files@v47
 
-- uses: robertrautenbach/rust-affected@v4.0.1
+- uses: robertrautenbach/rust-affected@v4.0.2
   with:
     changed_files: ${{ steps.changed.outputs.all_changed_files }}
 ```
@@ -102,7 +102,7 @@ You provide the list of changed files — here are common approaches:
   run: |
     echo "files=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
 
-- uses: robertrautenbach/rust-affected@v4.0.1
+- uses: robertrautenbach/rust-affected@v4.0.2
   with:
     changed_files: ${{ steps.changed.outputs.files }}
 ```
@@ -138,7 +138,7 @@ v4 is a breaking change. The action no longer detects changed files itself — y
 
 **Before (v3):**
 ```yaml
-- uses: robertrautenbach/rust-affected@v4.0.1
+- uses: robertrautenbach/rust-affected@v4.0.2
 ```
 
 **After (v4):**
@@ -147,7 +147,7 @@ v4 is a breaking change. The action no longer detects changed files itself — y
   id: changed
   uses: tj-actions/changed-files@v47
 
-- uses: robertrautenbach/rust-affected@v4.0.1
+- uses: robertrautenbach/rust-affected@v4.0.2
   with:
     changed_files: ${{ steps.changed.outputs.all_changed_files }}
 ```
