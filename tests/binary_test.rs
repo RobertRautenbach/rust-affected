@@ -593,3 +593,159 @@ fn lockfile_diff_unions_with_file_based_changes() {
     // app-alpha (file change) + app-beta (lockfile change via lib-standalone).
     assert_eq!(bins, vec!["app-alpha", "app-beta"]);
 }
+
+// ── BASE_SHA-driven Cargo.toml diff ─────────────────────────────────
+//
+// Mirror of the Cargo.lock-aware integration tests for the root-manifest
+// diff. Covers: precise member-add, build-affecting profile change, opt-out
+// via FORCE_TRIGGERS, and the safety fallback when BASE_SHA is bogus.
+
+fn add_workspace_member_to_manifest(toml: &str, name: &str) -> String {
+    // The fixture lists members in a multi-line array; splice the new name
+    // into the last entry's slot.
+    toml.replace(
+        "\"tools/tool-alpha\",\n]",
+        &format!("\"tools/tool-alpha\",\n    \"{name}\",\n]"),
+    )
+}
+
+#[test]
+fn manifest_member_add_is_no_force_all() {
+    let repo = TempRepo::new("manifest-member-add");
+    let base = repo.init_and_commit("initial");
+
+    // Add a new member crate on disk.
+    std::fs::create_dir_all(repo.dir.join("lib-new").join("src")).unwrap();
+    std::fs::write(
+        repo.dir.join("lib-new").join("Cargo.toml"),
+        "[package]\nname = \"lib-new\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.dir.join("lib-new").join("src").join("lib.rs"),
+        "// nothing yet\n",
+    )
+    .unwrap();
+
+    // Add lib-new to the workspace members list.
+    let manifest = std::fs::read_to_string(repo.dir.join("Cargo.toml")).unwrap();
+    std::fs::write(
+        repo.dir.join("Cargo.toml"),
+        add_workspace_member_to_manifest(&manifest, "lib-new"),
+    )
+    .unwrap();
+
+    repo.commit_all("add lib-new workspace member");
+
+    let (stdout, ok) = repo.run(&[
+        (
+            "CHANGED_FILES",
+            "Cargo.toml Cargo.lock lib-new/Cargo.toml lib-new/src/lib.rs",
+        ),
+        ("BASE_SHA", &base),
+    ]);
+    assert!(ok, "binary failed; stdout={stdout}");
+    let json = parse_json(&stdout);
+
+    assert_eq!(
+        json["force_all"], false,
+        "adding a workspace member must not force-all"
+    );
+    let changed: Vec<String> = serde_json::from_value(json["changed_crates"].clone()).unwrap();
+    assert_eq!(changed, vec!["lib-new"]);
+    let libs: Vec<String> =
+        serde_json::from_value(json["affected_library_members"].clone()).unwrap();
+    assert_eq!(libs, vec!["lib-new"]);
+    let bins: Vec<String> =
+        serde_json::from_value(json["affected_binary_members"].clone()).unwrap();
+    assert!(bins.is_empty());
+}
+
+#[test]
+fn manifest_profile_change_forces_all() {
+    let repo = TempRepo::new("manifest-profile-change");
+    let base = repo.init_and_commit("initial");
+
+    let original = std::fs::read_to_string(repo.dir.join("Cargo.toml")).unwrap();
+    let modified = format!("{original}\n[profile.release]\nopt-level = 3\n");
+    std::fs::write(repo.dir.join("Cargo.toml"), modified).unwrap();
+    repo.commit_all("tweak release profile");
+
+    let (stdout, ok) = repo.run(&[("CHANGED_FILES", "Cargo.toml"), ("BASE_SHA", &base)]);
+    assert!(ok);
+    let json = parse_json(&stdout);
+    assert_eq!(json["force_all"], true);
+}
+
+#[test]
+fn manifest_in_force_triggers_keeps_force_all_behavior() {
+    let repo = TempRepo::new("manifest-force-trigger");
+    let _base = repo.init_and_commit("initial");
+
+    let original = std::fs::read_to_string(repo.dir.join("Cargo.toml")).unwrap();
+    std::fs::write(
+        repo.dir.join("Cargo.toml"),
+        add_workspace_member_to_manifest(&original, "lib-new"),
+    )
+    .unwrap();
+    // No need to actually create lib-new; force_triggers short-circuits
+    // before cargo metadata is invoked... actually cargo metadata IS
+    // invoked. Create stub files so metadata succeeds.
+    std::fs::create_dir_all(repo.dir.join("lib-new").join("src")).unwrap();
+    std::fs::write(
+        repo.dir.join("lib-new").join("Cargo.toml"),
+        "[package]\nname = \"lib-new\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.dir.join("lib-new").join("src").join("lib.rs"),
+        "",
+    )
+    .unwrap();
+    repo.commit_all("add lib-new");
+
+    let (stdout, ok) = repo.run(&[
+        ("CHANGED_FILES", "Cargo.toml"),
+        ("FORCE_TRIGGERS", "Cargo.toml"),
+        // BASE_SHA deliberately omitted to prove force_triggers short-circuits
+        // before we attempt the git fetch.
+    ]);
+    assert!(ok, "stdout={stdout}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["force_all"], true);
+}
+
+#[test]
+fn manifest_change_with_no_base_sha_falls_back_to_force_all() {
+    let repo = TempRepo::new("manifest-no-base");
+    let _base = repo.init_and_commit("initial");
+
+    let original = std::fs::read_to_string(repo.dir.join("Cargo.toml")).unwrap();
+    let modified = format!("{original}\n[profile.release]\nopt-level = 3\n");
+    std::fs::write(repo.dir.join("Cargo.toml"), modified).unwrap();
+    repo.commit_all("profile change");
+
+    let (stdout, ok) = repo.run(&[("CHANGED_FILES", "Cargo.toml")]);
+    assert!(ok);
+    let json = parse_json(&stdout);
+    assert_eq!(json["force_all"], true);
+}
+
+#[test]
+fn manifest_change_with_bogus_base_sha_falls_back_to_force_all() {
+    let repo = TempRepo::new("manifest-bogus-base");
+    let _base = repo.init_and_commit("initial");
+
+    let original = std::fs::read_to_string(repo.dir.join("Cargo.toml")).unwrap();
+    let modified = format!("{original}\n[profile.release]\nopt-level = 3\n");
+    std::fs::write(repo.dir.join("Cargo.toml"), modified).unwrap();
+    repo.commit_all("profile change");
+
+    let (stdout, ok) = repo.run(&[
+        ("CHANGED_FILES", "Cargo.toml"),
+        ("BASE_SHA", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+    ]);
+    assert!(ok);
+    let json = parse_json(&stdout);
+    assert_eq!(json["force_all"], true);
+}

@@ -1,5 +1,5 @@
 use guppy::{MetadataCommand, graph::PackageGraph};
-use rust_affected::{compute_affected, git_show, lockfile};
+use rust_affected::{compute_affected, git_show, lockfile, manifest};
 use std::collections::HashSet;
 use std::env;
 use std::io::Write;
@@ -27,23 +27,42 @@ fn main() {
 
     let base_sha = env::var("BASE_SHA").ok().filter(|s| !s.trim().is_empty());
 
-    // Snapshot Cargo.lock from disk BEFORE invoking `cargo metadata`. Cargo
-    // will silently rewrite a lockfile it considers inconsistent with the
-    // workspace's `Cargo.toml`s, which would defeat the diff. The committed
-    // state is what we care about.
+    // Snapshot Cargo.lock and Cargo.toml from disk BEFORE invoking
+    // `cargo metadata`. Cargo can silently rewrite either when it considers
+    // the manifest/lockfile inconsistent during resolution; the committed
+    // state is what we want to diff.
     let new_lockfile_snapshot = std::fs::read_to_string("Cargo.lock").ok();
+    let new_manifest_snapshot = std::fs::read_to_string("Cargo.toml").ok();
 
     let mut cmd = MetadataCommand::new();
     let graph = PackageGraph::from_command(&mut cmd)
         .expect("Failed to load package graph. Is this a Cargo workspace?");
 
-    let (lockfile_affected, force_all_override) = lockfile_aware_diff(
-        &graph,
+    let workspace_root = graph.workspace().root().as_std_path().to_path_buf();
+    let member_names: Vec<String> = graph
+        .workspace()
+        .iter()
+        .map(|p| p.name().to_string())
+        .collect();
+
+    let (lockfile_affected, lockfile_force_all) = lockfile_aware_diff(
+        &workspace_root,
+        &member_names,
         &changed_files,
         &force_triggers,
         base_sha.as_deref(),
         new_lockfile_snapshot.as_deref(),
     );
+
+    let manifest_force_all = manifest_aware_force_all(
+        &workspace_root,
+        &changed_files,
+        &force_triggers,
+        base_sha.as_deref(),
+        new_manifest_snapshot.as_deref(),
+    );
+
+    let force_all_override = lockfile_force_all || manifest_force_all;
 
     let result = compute_affected(
         &graph,
@@ -76,7 +95,8 @@ fn main() {
 /// Users who want the old behavior unconditionally can keep `Cargo.lock` in
 /// their `force_triggers`; the new diff is only attempted when it isn't.
 fn lockfile_aware_diff(
-    graph: &PackageGraph,
+    workspace_root: &Path,
+    member_names: &[String],
     changed_files: &[String],
     force_triggers: &[String],
     base_sha: Option<&str>,
@@ -107,8 +127,7 @@ fn lockfile_aware_diff(
         return (HashSet::new(), true);
     };
 
-    let workspace_root = graph.workspace().root().as_std_path();
-    let old_lockfile = match git_show::git_show(Path::new(workspace_root), base_sha, "Cargo.lock") {
+    let old_lockfile = match git_show::git_show(workspace_root, base_sha, "Cargo.lock") {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
@@ -119,8 +138,8 @@ fn lockfile_aware_diff(
         }
     };
 
-    let member_names: Vec<&str> = graph.workspace().iter().map(|p| p.name()).collect();
-    let diff = lockfile::compute_lockfile_diff(&old_lockfile, new_lockfile, &member_names);
+    let member_refs: Vec<&str> = member_names.iter().map(String::as_str).collect();
+    let diff = lockfile::compute_lockfile_diff(&old_lockfile, new_lockfile, &member_refs);
     if let Some(reason) = diff.fallback_reason {
         eprintln!(
             "rust-affected: lockfile diff failed ({reason}); \
@@ -129,6 +148,61 @@ fn lockfile_aware_diff(
         return (HashSet::new(), true);
     }
     (diff.affected_members, false)
+}
+
+fn manifest_aware_force_all(
+    workspace_root: &Path,
+    changed_files: &[String],
+    force_triggers: &[String],
+    base_sha: Option<&str>,
+    new_manifest_snapshot: Option<&str>,
+) -> bool {
+    let manifest_changed = changed_files.iter().any(|f| f == "Cargo.toml");
+    if !manifest_changed {
+        return false;
+    }
+    if rust_affected::check_force_triggers(&["Cargo.toml".to_string()], force_triggers) {
+        // User opted into the old behavior by listing Cargo.toml as a force
+        // trigger; respect that and skip the diff. The existing
+        // check_force_triggers result will set force_all elsewhere.
+        return false;
+    }
+
+    let Some(base_sha) = base_sha else {
+        eprintln!(
+            "rust-affected: Cargo.toml changed but BASE_SHA is unset; \
+             falling back to force_all=true"
+        );
+        return true;
+    };
+    let Some(new_manifest) = new_manifest_snapshot else {
+        eprintln!(
+            "rust-affected: failed to read current Cargo.toml; \
+             falling back to force_all=true"
+        );
+        return true;
+    };
+
+    let old_manifest = match git_show::git_show(workspace_root, base_sha, "Cargo.toml") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "rust-affected: could not load old Cargo.toml at {base_sha}: {e}; \
+                 falling back to force_all=true"
+            );
+            return true;
+        }
+    };
+
+    let diff = manifest::compute_manifest_diff(&old_manifest, new_manifest);
+    if let Some(reason) = diff.fallback_reason {
+        eprintln!(
+            "rust-affected: manifest diff failed ({reason}); \
+             falling back to force_all=true"
+        );
+        return true;
+    }
+    diff.force_all
 }
 
 fn emit_output(force: bool, changed: Vec<String>, affected: Vec<String>, binaries: Vec<String>) {

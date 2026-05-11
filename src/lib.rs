@@ -5,6 +5,7 @@ use std::path::Path;
 
 pub mod git_show;
 pub mod lockfile;
+pub mod manifest;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AffectedResult {

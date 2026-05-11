@@ -27,7 +27,6 @@ jobs:
         uses: robertrautenbach/rust-affected@v3.1.0
         with:
           force_triggers: |
-            Cargo.toml
             rust-toolchain.toml
             .cargo/config.toml
             .github/
@@ -73,6 +72,34 @@ The diff falls back to `force_all=true` (the safe over-build direction) when:
 - **Dev-deps, build-deps, and proc-macro deps are not distinguished from normal deps.** `Cargo.lock` does not preserve dependency kind, so a dev-dep-only bump triggers a rebuild of dependents that strictly wouldn't need one. Conservative over-build, no false negatives.
 - **Target-specific (`cfg(...)`) deps are treated as universally affecting.** A Windows-only dep version bump will mark Linux-only crates affected. Same conservative direction.
 - Everything else — registry version bumps, git revision changes, path-dep rewrites, `[patch]`/`[replace]` redirects, multi-version resolutions, checksum changes (yanked re-uploads) — is captured exactly.
+
+## How root `Cargo.toml` changes are handled
+
+When the root `Cargo.toml` is among the changed files, the action parses the old and new manifest and classifies each changed key as either build-affecting or safe-to-ignore. Member-list edits, metadata churn, and workspace-dep version bumps (which `Cargo.lock` already catches) don't force a rebuild. Build-affecting changes — profile flags, the resolver, edition bumps, lint levels — set `force_all=true`.
+
+Add `Cargo.toml` to your `force_triggers` list to opt out and keep the old "any change forces full rebuild" behavior.
+
+The diff falls back to `force_all=true` (the safe over-build direction) on the same conditions as the lockfile diff: missing `BASE_SHA`, unfetchable old manifest, or parse error.
+
+### Allow-listed key paths (no force_all)
+
+- `workspace.members`, `workspace.exclude`, `workspace.default-members` — add/remove members; the file-based path picks up new crates
+- `workspace.metadata.*` — Cargo doesn't read these for build
+- `workspace.package.{description,authors,license,license-file,repository,homepage,documentation,readme,keywords,categories,publish,include,exclude}` — metadata-only
+- `workspace.dependencies.<name>.{version,git,rev,branch,tag,path,registry}` — lockfile-reflected; the Cargo.lock-aware diff handles them
+- `patch.<source>.<name>.<field>` and `replace.<name>.<field>` — same lockfile-reflected sub-fields
+- For non-virtual workspaces (root has `[package]`): all root-package keys, since the file-based path already attributes them to the root crate
+
+### Build-affecting changes (force_all=true)
+
+- `[profile.*]` — compile flags
+- `[lints]`, `[workspace.lints]` — lint levels can flip build success
+- `workspace.resolver` — feature unification rules
+- `workspace.package.{edition,rust-version,version,links}` — inherited by members
+- `cargo-features = [...]` at the top level — unstable Cargo features
+- `workspace.target.*` — currently classified as force-all in v1 (rare, complex resolver interactions)
+- `workspace.dependencies.<name>.{features,default-features,optional,package}` — feature toggles and renames can change compilation without changing `Cargo.lock`
+- Any unrecognized top-level section (defensive default)
 
 ## How `base_sha` works
 
