@@ -3,6 +3,9 @@ use guppy::graph::PackageGraph;
 use std::collections::HashSet;
 use std::path::Path;
 
+pub mod git_show;
+pub mod lockfile;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AffectedResult {
     pub force_all: bool,
@@ -81,6 +84,8 @@ pub fn compute_affected(
     changed_files: &[String],
     force_triggers: &[String],
     excluded: &HashSet<String>,
+    lockfile_affected_members: &HashSet<String>,
+    force_all_override: bool,
 ) -> AffectedResult {
     if changed_files.is_empty() {
         return AffectedResult {
@@ -91,7 +96,7 @@ pub fn compute_affected(
         };
     }
 
-    let force_all = check_force_triggers(changed_files, force_triggers);
+    let force_all = check_force_triggers(changed_files, force_triggers) || force_all_override;
 
     let workspace_root = graph.workspace().root().as_std_path();
 
@@ -108,13 +113,19 @@ pub fn compute_affected(
     };
 
     let mut direct_ids = Vec::new();
+    let mut file_changed_ids: HashSet<guppy::PackageId> = HashSet::new();
     for pkg in graph.workspace().iter() {
         let pkg_dir = relative_dir(&pkg);
 
-        if changed_files
+        let touched_by_file = changed_files
             .iter()
-            .any(|f| Path::new(f).starts_with(&pkg_dir))
-        {
+            .any(|f| Path::new(f).starts_with(&pkg_dir));
+        let touched_by_lockfile = lockfile_affected_members.contains(pkg.name());
+
+        if touched_by_file {
+            file_changed_ids.insert(pkg.id().clone());
+        }
+        if touched_by_file || touched_by_lockfile {
             direct_ids.push(pkg.id().clone());
         }
     }
@@ -130,7 +141,7 @@ pub fn compute_affected(
 
     let workspace = graph.workspace();
 
-    let mut changed_crates: Vec<String> = direct_ids
+    let mut changed_crates: Vec<String> = file_changed_ids
         .iter()
         .filter_map(|id| graph.metadata(id).ok())
         .filter(|pkg| {

@@ -103,6 +103,7 @@ runs:
         CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         FORCE_TRIGGERS: ${{ inputs.force_triggers }}
         EXCLUDED_MEMBERS: ${{ inputs.excluded_members }}
+        BASE_SHA: ${{ steps.resolve-sha.outputs.sha }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         # Extract the git ref from the action's download path.
@@ -124,6 +125,7 @@ runs:
           -e CHANGED_FILES \
           -e FORCE_TRIGGERS \
           -e EXCLUDED_MEMBERS \
+          -e BASE_SHA \
           -v "${GITHUB_WORKSPACE}:/github/workspace" \
           -w /github/workspace \
           "$IMAGE")

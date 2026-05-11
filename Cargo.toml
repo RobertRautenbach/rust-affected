@@ -15,6 +15,7 @@ path = "src/main.rs"
 guppy = "0.17.25"
 globset = "0.4"
 serde_json = "1"
+cargo-lock = "10"
 
 [profile.release]
 opt-level = "z"

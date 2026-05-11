@@ -1,8 +1,24 @@
 use guppy::{MetadataCommand, graph::PackageGraph};
-use rust_affected::{AffectedResult, compute_affected};
+use rust_affected::{AffectedResult, compute_affected as compute_affected_full};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+
+fn compute_affected(
+    graph: &PackageGraph,
+    changed_files: &[String],
+    force_triggers: &[String],
+    excluded: &HashSet<String>,
+) -> AffectedResult {
+    compute_affected_full(
+        graph,
+        changed_files,
+        force_triggers,
+        excluded,
+        &HashSet::new(),
+        false,
+    )
+}
 
 fn fixture_graph() -> &'static PackageGraph {
     static GRAPH: OnceLock<PackageGraph> = OnceLock::new();

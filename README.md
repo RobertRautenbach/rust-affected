@@ -24,10 +24,9 @@ jobs:
 
       - name: Detect affected packages
         id: affected
-        uses: robertrautenbach/rust-affected@v3.0.3
+        uses: robertrautenbach/rust-affected@v3.1.0
         with:
           force_triggers: |
-            Cargo.lock
             Cargo.toml
             rust-toolchain.toml
             .cargo/config.toml
@@ -58,6 +57,23 @@ jobs:
 | `affected_binary_members` | JSON array of affected workspace members that have a binary target; mutually exclusive with `affected_library_members` |
 | `force_all` | `"true"` if a force-trigger file changed, otherwise `"false"` |
 
+## How `Cargo.lock` changes are handled
+
+When `Cargo.lock` is among the changed files, the action diffs the old and new lockfile (the old one is fetched with `git show $BASE_SHA:Cargo.lock`) and walks each workspace member's transitive dependency set in both. Members whose transitive set differs by `(name, version, source, checksum)` are marked affected; the rest are skipped. Reverse-dependency traversal in the workspace graph then unions these with any file-based direct changes, so an external dep bump that only touches one transitive crate doesn't rebuild the rest of the workspace.
+
+If you'd rather keep the old "always rebuild everything on Cargo.lock change" behavior, add `Cargo.lock` to your `force_triggers` list — the diff is skipped whenever the lockfile is force-triggered.
+
+The diff falls back to `force_all=true` (the safe over-build direction) when:
+- `BASE_SHA` is not supplied
+- The old `Cargo.lock` cannot be fetched at that SHA (shallow clone, missing file)
+- Either lockfile fails to parse
+
+### Known limitations
+
+- **Dev-deps, build-deps, and proc-macro deps are not distinguished from normal deps.** `Cargo.lock` does not preserve dependency kind, so a dev-dep-only bump triggers a rebuild of dependents that strictly wouldn't need one. Conservative over-build, no false negatives.
+- **Target-specific (`cfg(...)`) deps are treated as universally affecting.** A Windows-only dep version bump will mark Linux-only crates affected. Same conservative direction.
+- Everything else — registry version bumps, git revision changes, path-dep rewrites, `[patch]`/`[replace]` redirects, multi-version resolutions, checksum changes (yanked re-uploads) — is captured exactly.
+
 ## How `base_sha` works
 
 The diff base is chosen automatically depending on the event type:
@@ -73,13 +89,13 @@ The diff base is chosen automatically depending on the event type:
 Pass an explicit `base_sha` to compare against any commit:
 
 ```yaml
-- uses: robertrautenbach/rust-affected@v3.0.3
+- uses: robertrautenbach/rust-affected@v3.1.0
   with:
     base_sha: ${{ github.event.before }}   # always use previous-push diff, even on PRs
 ```
 
 ```yaml
-- uses: robertrautenbach/rust-affected@v3.0.3
+- uses: robertrautenbach/rust-affected@v3.1.0
   with:
     base_sha: ${{ github.sha }}~1          # always compare to the immediate parent
 ```

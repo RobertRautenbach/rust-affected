@@ -24,6 +24,7 @@ fn run_binary(envs: &[(&str, &str)]) -> (String, bool) {
     cmd.env_remove("CHANGED_FILES");
     cmd.env_remove("FORCE_TRIGGERS");
     cmd.env_remove("EXCLUDED_MEMBERS");
+    cmd.env_remove("BASE_SHA");
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -323,4 +324,272 @@ fn all_env_vars_together() {
     let binaries: Vec<String> =
         serde_json::from_value(json["affected_binary_members"].clone()).unwrap();
     assert_eq!(binaries, vec!["app-beta", "tool-alpha"]);
+}
+
+// ── BASE_SHA-driven Cargo.lock diff ─────────────────────────────────
+//
+// These tests build a throwaway git repo containing a copy of the fixture
+// workspace, commit two versions of `Cargo.lock`, then run the binary with
+// `BASE_SHA` pointing at the first commit and `CHANGED_FILES="Cargo.lock"`.
+// They cover: precise per-member diff, opt-out via FORCE_TRIGGERS, and
+// the safety fallback to `force_all=true` when BASE_SHA is missing/bogus.
+
+struct TempRepo {
+    dir: PathBuf,
+}
+
+impl TempRepo {
+    fn new(test_name: &str) -> Self {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "rust-affected-test-{}-{}",
+            test_name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        // Copy the fixture workspace into the temp dir.
+        let status = Command::new("cp")
+            .arg("-R")
+            .arg(format!("{}/.", fixture_dir().display()))
+            .arg(&dir)
+            .status()
+            .expect("cp -R");
+        assert!(status.success(), "failed to copy fixture into {dir:?}");
+        Self { dir }
+    }
+
+    fn git(&self, args: &[&str]) -> std::process::Output {
+        let out = Command::new("git")
+            .current_dir(&self.dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.test")
+            .args(args)
+            .output()
+            .expect("git invocation failed");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
+    fn init_and_commit(&self, msg: &str) -> String {
+        self.git(&["init", "--quiet", "-b", "main"]);
+        self.git(&["add", "."]);
+        self.git(&["commit", "--quiet", "-m", msg]);
+        let out = self.git(&["rev-parse", "HEAD"]);
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn commit_all(&self, msg: &str) -> String {
+        self.git(&["add", "."]);
+        self.git(&["commit", "--quiet", "-m", msg]);
+        let out = self.git(&["rev-parse", "HEAD"]);
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn write_lockfile(&self, contents: &str) {
+        std::fs::write(self.dir.join("Cargo.lock"), contents).expect("write Cargo.lock");
+    }
+
+    fn run(&self, envs: &[(&str, &str)]) -> (String, bool) {
+        let mut cmd = Command::new(binary_path());
+        cmd.current_dir(&self.dir);
+        cmd.env_remove("GITHUB_OUTPUT");
+        cmd.env_remove("CHANGED_FILES");
+        cmd.env_remove("FORCE_TRIGGERS");
+        cmd.env_remove("EXCLUDED_MEMBERS");
+        cmd.env_remove("BASE_SHA");
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("run binary");
+        (String::from_utf8(out.stdout).unwrap(), out.status.success())
+    }
+}
+
+impl Drop for TempRepo {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+// Adds an isolated `anyhow` registry dep to a target workspace member in the
+// fixture lockfile. Returns the modified lockfile content. Only the chain
+// reaching `target` (via the fixture's static dep graph) should be flagged.
+fn lockfile_with_dep_added_to(target: &str) -> String {
+    let original =
+        std::fs::read_to_string(fixture_dir().join("Cargo.lock")).expect("read fixture lockfile");
+    let needle = format!(
+        "[[package]]\nname = \"{target}\"\nversion = \"0.1.0\"\n"
+    );
+    let replacement = format!(
+        "[[package]]\nname = \"{target}\"\nversion = \"0.1.0\"\ndependencies = [\n \"anyhow\",\n]\n\n\
+         [[package]]\nname = \"anyhow\"\nversion = \"1.0.80\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0000000000000000000000000000000000000000000000000000000000000003\"\n"
+    );
+    assert!(
+        original.contains(&needle),
+        "fixture lockfile shape changed; needle not found:\n{needle}"
+    );
+    original.replace(&needle, &replacement)
+}
+
+#[test]
+fn lockfile_diff_only_affects_dependent_chain() {
+    let repo = TempRepo::new("lockfile-diff-chain");
+    let base = repo.init_and_commit("initial");
+    // Modify Cargo.lock: lib-utils gains a new external dep. lib-standalone
+    // and lib-with-tests should remain unaffected.
+    repo.write_lockfile(&lockfile_with_dep_added_to("lib-utils"));
+    repo.commit_all("bump lib-utils transitive");
+
+    let (stdout, ok) = repo.run(&[("CHANGED_FILES", "Cargo.lock"), ("BASE_SHA", &base)]);
+    assert!(ok, "binary failed; stdout={stdout}");
+    let json = parse_json(&stdout);
+
+    assert_eq!(json["force_all"], false);
+    // Cargo.lock isn't inside any crate dir, so changed_crates stays empty.
+    let changed: Vec<String> = serde_json::from_value(json["changed_crates"].clone()).unwrap();
+    assert!(changed.is_empty());
+
+    let libs: Vec<String> =
+        serde_json::from_value(json["affected_library_members"].clone()).unwrap();
+    // Pure libraries reaching lib-utils: lib-utils, lib-core, lib-core-ext.
+    assert_eq!(libs, vec!["lib-core", "lib-core-ext", "lib-utils"]);
+
+    let bins: Vec<String> =
+        serde_json::from_value(json["affected_binary_members"].clone()).unwrap();
+    assert_eq!(bins, vec!["app-alpha", "app-beta", "tool-alpha"]);
+}
+
+#[test]
+fn lockfile_diff_isolated_change_does_not_pull_unrelated_members() {
+    let repo = TempRepo::new("lockfile-diff-isolated");
+    let base = repo.init_and_commit("initial");
+    // Only lib-standalone gains a new external dep. Its sole dependent is
+    // app-beta. Nothing else should be touched.
+    repo.write_lockfile(&lockfile_with_dep_added_to("lib-standalone"));
+    repo.commit_all("bump lib-standalone transitive");
+
+    let (stdout, ok) = repo.run(&[("CHANGED_FILES", "Cargo.lock"), ("BASE_SHA", &base)]);
+    assert!(ok);
+    let json = parse_json(&stdout);
+
+    assert_eq!(json["force_all"], false);
+    let libs: Vec<String> =
+        serde_json::from_value(json["affected_library_members"].clone()).unwrap();
+    assert_eq!(libs, vec!["lib-standalone"]);
+    let bins: Vec<String> =
+        serde_json::from_value(json["affected_binary_members"].clone()).unwrap();
+    assert_eq!(bins, vec!["app-beta"]);
+}
+
+#[test]
+fn lockfile_in_force_triggers_keeps_force_all_behavior() {
+    let repo = TempRepo::new("lockfile-force-trigger");
+    let _base = repo.init_and_commit("initial");
+    repo.write_lockfile(&lockfile_with_dep_added_to("lib-utils"));
+    repo.commit_all("bump");
+
+    // User opts out by listing Cargo.lock in force_triggers.
+    let (stdout, ok) = repo.run(&[
+        ("CHANGED_FILES", "Cargo.lock"),
+        ("FORCE_TRIGGERS", "Cargo.lock"),
+        // BASE_SHA deliberately omitted to prove force_triggers short-circuits
+        // before we attempt the git fetch.
+    ]);
+    assert!(ok);
+    let json = parse_json(&stdout);
+    assert_eq!(json["force_all"], true);
+}
+
+#[test]
+fn lockfile_change_with_no_base_sha_falls_back_to_force_all() {
+    let repo = TempRepo::new("lockfile-no-base");
+    let _base = repo.init_and_commit("initial");
+    repo.write_lockfile(&lockfile_with_dep_added_to("lib-utils"));
+    repo.commit_all("bump");
+
+    // No BASE_SHA → cannot fetch old lockfile → safe fallback to force_all.
+    let (stdout, ok) = repo.run(&[("CHANGED_FILES", "Cargo.lock")]);
+    assert!(ok);
+    let json = parse_json(&stdout);
+    assert_eq!(json["force_all"], true);
+}
+
+#[test]
+fn lockfile_change_with_bogus_base_sha_falls_back_to_force_all() {
+    let repo = TempRepo::new("lockfile-bogus-base");
+    let _base = repo.init_and_commit("initial");
+    repo.write_lockfile(&lockfile_with_dep_added_to("lib-utils"));
+    repo.commit_all("bump");
+
+    // Bogus SHA → git show fails → safe fallback.
+    let (stdout, ok) = repo.run(&[
+        ("CHANGED_FILES", "Cargo.lock"),
+        ("BASE_SHA", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+    ]);
+    assert!(ok);
+    let json = parse_json(&stdout);
+    assert_eq!(json["force_all"], true);
+}
+
+#[test]
+fn lockfile_unchanged_between_commits_yields_no_affected_members() {
+    let repo = TempRepo::new("lockfile-unchanged");
+    let base = repo.init_and_commit("initial");
+    // Second commit touches a non-lockfile file. Cargo.lock is unchanged
+    // between base and HEAD, so the new path shouldn't even be invoked
+    // (CHANGED_FILES doesn't include Cargo.lock).
+    std::fs::write(repo.dir.join("README.md"), "hello\n").unwrap();
+    repo.commit_all("touch readme");
+
+    let (stdout, ok) = repo.run(&[("CHANGED_FILES", "README.md"), ("BASE_SHA", &base)]);
+    assert!(ok);
+    let json = parse_json(&stdout);
+    assert_eq!(json["force_all"], false);
+    let libs: Vec<String> =
+        serde_json::from_value(json["affected_library_members"].clone()).unwrap();
+    assert!(libs.is_empty());
+}
+
+#[test]
+fn lockfile_diff_unions_with_file_based_changes() {
+    let repo = TempRepo::new("lockfile-union");
+    let base = repo.init_and_commit("initial");
+    // Lockfile change touches the lib-standalone chain (→ app-beta only),
+    // while a file change touches app-alpha directly.
+    repo.write_lockfile(&lockfile_with_dep_added_to("lib-standalone"));
+    std::fs::write(
+        repo.dir.join("app-alpha").join("src").join("main.rs"),
+        "fn main() { println!(\"hi\"); }\n",
+    )
+    .unwrap();
+    repo.commit_all("two-change commit");
+
+    let (stdout, ok) = repo.run(&[
+        ("CHANGED_FILES", "Cargo.lock app-alpha/src/main.rs"),
+        ("BASE_SHA", &base),
+    ]);
+    assert!(ok);
+    let json = parse_json(&stdout);
+    assert_eq!(json["force_all"], false);
+
+    // changed_crates only reflects FILE-level changes, not lockfile-derived ones.
+    let changed: Vec<String> = serde_json::from_value(json["changed_crates"].clone()).unwrap();
+    assert_eq!(changed, vec!["app-alpha"]);
+
+    let libs: Vec<String> =
+        serde_json::from_value(json["affected_library_members"].clone()).unwrap();
+    assert_eq!(libs, vec!["lib-standalone"]);
+
+    let bins: Vec<String> =
+        serde_json::from_value(json["affected_binary_members"].clone()).unwrap();
+    // app-alpha (file change) + app-beta (lockfile change via lib-standalone).
+    assert_eq!(bins, vec!["app-alpha", "app-beta"]);
 }
