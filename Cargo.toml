@@ -12,7 +12,7 @@ name = "rust-affected"
 path = "src/main.rs"
 
 [dependencies]
-guppy = "0.17.25"
+guppy = "0.17.26"
 globset = "0.4"
 serde_json = "1"
 
