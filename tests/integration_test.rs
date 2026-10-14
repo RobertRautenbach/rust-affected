@@ -26,7 +26,7 @@ fn fixture_graph() -> &'static PackageGraph {
 }
 
 fn s(v: &[&str]) -> Vec<String> {
-    v.iter().map(|s| s.to_string()).collect()
+    v.iter().map(ToString::to_string).collect()
 }
 
 fn no_excludes() -> HashSet<String> {
@@ -34,7 +34,7 @@ fn no_excludes() -> HashSet<String> {
 }
 
 fn excludes(names: &[&str]) -> HashSet<String> {
-    names.iter().map(|s| s.to_string()).collect()
+    names.iter().map(ToString::to_string).collect()
 }
 
 // ── No changed files ────────────────────────────────────────────────

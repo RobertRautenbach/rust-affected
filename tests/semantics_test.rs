@@ -60,23 +60,73 @@ fn excluding_a_member_does_not_leak_an_external_namesake() {
 #[test]
 fn ordinary_changes_with_external_namesakes_keep_reverse_dependents() {
     let result = compute("name-collision/workspace", &["member/src/lib.rs"], &[], &[]);
-    assert_lists(result, &["shared"], &["consumer", "shared"], &[]);
+    assert_lists(&result, &["shared"], &["consumer", "shared"], &[]);
+}
+
+#[test]
+fn default_result_is_empty_without_warnings_or_force() {
+    assert_eq!(
+        AffectedResult::default(),
+        AffectedResult {
+            warnings: vec![],
+            force_all: false,
+            changed_crates: vec![],
+            affected_library_members: vec![],
+            affected_binary_members: vec![],
+        }
+    );
+}
+
+#[test]
+fn serialized_result_has_only_the_four_output_fields() {
+    let result = compute(
+        "root-package",
+        &["sub-lib/src/lib.rs", "../bad"],
+        &["sub-lib/**"],
+        &["unknown"],
+    );
+    assert_eq!(result.warnings.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&result).unwrap(),
+        serde_json::json!({
+            "changed_crates": ["sub-lib"],
+            "affected_library_members": ["independent-lib", "sub-lib"],
+            "affected_binary_members": ["root-app"],
+            "force_all": true,
+        })
+    );
+}
+
+#[test]
+fn exclusions_support_a_non_default_hasher() {
+    use std::hash::{BuildHasherDefault, DefaultHasher};
+    let excluded: HashSet<String, BuildHasherDefault<DefaultHasher>> =
+        ["shared".to_string()].into_iter().collect();
+    let result = compute_affected(
+        graph("name-collision/workspace"),
+        &["member/src/lib.rs".into()],
+        &[],
+        &excluded,
+    )
+    .unwrap();
+    assert_lists(&result, &[], &["consumer"], &[]);
+    assert!(result.warnings.is_empty());
 }
 
 fn compute(name: &str, files: &[&str], triggers: &[&str], excluded: &[&str]) -> AffectedResult {
     compute_affected(
         graph(name),
-        &files.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-        &triggers.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        &files.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        &triggers.iter().map(ToString::to_string).collect::<Vec<_>>(),
         &excluded
             .iter()
-            .map(|s| s.to_string())
+            .map(ToString::to_string)
             .collect::<HashSet<_>>(),
     )
     .unwrap()
 }
 
-fn assert_lists(result: AffectedResult, changed: &[&str], libraries: &[&str], binaries: &[&str]) {
+fn assert_lists(result: &AffectedResult, changed: &[&str], libraries: &[&str], binaries: &[&str]) {
     assert_eq!(result.changed_crates, changed);
     assert_eq!(result.affected_library_members, libraries);
     assert_eq!(result.affected_binary_members, binaries);
@@ -92,7 +142,7 @@ fn deepest_member_owns_files_and_directories() {
         "sub-lib/",
     ] {
         assert_lists(
-            compute("root-package", &[file], &[], &[]),
+            &compute("root-package", &[file], &[], &[]),
             &["sub-lib"],
             &["sub-lib"],
             &["root-app"],
@@ -105,7 +155,7 @@ fn deepest_member_owns_files_and_directories() {
         "parent/nested/",
     ] {
         assert_lists(
-            compute("nested-package", &[file], &[], &[]),
+            &compute("nested-package", &[file], &[], &[]),
             &["nested"],
             &["nested", "parent"],
             &[],
@@ -116,13 +166,13 @@ fn deepest_member_owns_files_and_directories() {
 #[test]
 fn directory_ancestry_is_not_a_dependency() {
     assert_lists(
-        compute("root-package", &["independent-lib/src/lib.rs"], &[], &[]),
+        &compute("root-package", &["independent-lib/src/lib.rs"], &[], &[]),
         &["independent-lib"],
         &["independent-lib"],
         &[],
     );
     assert_lists(
-        compute(
+        &compute(
             "nested-package",
             &["parent/independent/src/lib.rs"],
             &[],
@@ -138,7 +188,7 @@ fn directory_ancestry_is_not_a_dependency() {
 fn parent_and_root_files_keep_their_owner() {
     for file in ["src/main.rs", "Cargo.lock", "README.md"] {
         assert_lists(
-            compute("root-package", &[file], &[], &[]),
+            &compute("root-package", &[file], &[], &[]),
             &["root-app"],
             &[],
             &["root-app"],
@@ -150,7 +200,7 @@ fn parent_and_root_files_keep_their_owner() {
         "parent/nested-extra/deleted.rs",
     ] {
         assert_lists(
-            compute("nested-package", &[file], &[], &[]),
+            &compute("nested-package", &[file], &[], &[]),
             &["parent"],
             &["parent"],
             &[],
@@ -161,13 +211,13 @@ fn parent_and_root_files_keep_their_owner() {
 #[test]
 fn exclusions_never_reassign_ownership_or_prune_traversal() {
     assert_lists(
-        compute("root-package", &["sub-lib/src/lib.rs"], &[], &["sub-lib"]),
+        &compute("root-package", &["sub-lib/src/lib.rs"], &[], &["sub-lib"]),
         &[],
         &[],
         &["root-app"],
     );
     assert_lists(
-        compute(
+        &compute(
             "root-package",
             &["independent-lib/src/lib.rs"],
             &[],
@@ -178,7 +228,7 @@ fn exclusions_never_reassign_ownership_or_prune_traversal() {
         &[],
     );
     assert_lists(
-        compute(
+        &compute(
             "nested-package",
             &["parent/independent/src/lib.rs"],
             &[],
@@ -189,7 +239,7 @@ fn exclusions_never_reassign_ownership_or_prune_traversal() {
         &[],
     );
     assert_lists(
-        compute("root-package", &["sub-lib/src/lib.rs"], &[], &["root-app"]),
+        &compute("root-package", &["sub-lib/src/lib.rs"], &[], &["root-app"]),
         &["sub-lib"],
         &["sub-lib"],
         &[],
@@ -217,7 +267,7 @@ fn equivalent_paths_produce_identical_results() {
 fn invalid_paths_cannot_own_files_or_force_the_workspace() {
     for file in ["", ".", "./", "/", "/elsewhere/x", "../x", "sub-lib/../x"] {
         assert_lists(
-            compute("root-package", &[file], &["**"], &[]),
+            &compute("root-package", &[file], &["**"], &[]),
             &[],
             &[],
             &[],
@@ -242,7 +292,7 @@ fn normalized_paths_and_patterns_activate_force_triggers() {
 fn exclusions_are_normalized_component_prefixes() {
     for exclude in ["./parent/nested", "parent//nested/", "././parent/nested/"] {
         assert_lists(
-            compute(
+            &compute(
                 "nested-package",
                 &["parent/nested/src/lib.rs"],
                 &[],
@@ -255,7 +305,7 @@ fn exclusions_are_normalized_component_prefixes() {
     }
     for exclude in ["/", ".", "./", "parent/../", "/parent/"] {
         assert_lists(
-            compute("root-package", &["src/main.rs"], &[], &[exclude]),
+            &compute("root-package", &["src/main.rs"], &[], &[exclude]),
             &["root-app"],
             &[],
             &["root-app"],
@@ -263,7 +313,7 @@ fn exclusions_are_normalized_component_prefixes() {
     }
     // The directory is "parent/independent", but the crate name is "independent".
     assert_lists(
-        compute(
+        &compute(
             "nested-package",
             &["parent/independent/gone.rs"],
             &[],
@@ -278,7 +328,7 @@ fn exclusions_are_normalized_component_prefixes() {
 #[test]
 fn deleted_files_renames_and_duplicates_are_lexical() {
     assert_lists(
-        compute(
+        &compute(
             "nested-package",
             &[
                 "parent/independent/deleted.rs",
@@ -328,8 +378,13 @@ fn warnings_are_deterministic_and_checked_against_all_members() {
 #[test]
 fn library_reports_invalid_globs_even_for_empty_input() {
     use std::error::Error as _;
-    let error =
-        compute_affected(graph("workspace"), &[], &["[abc".into()], &HashSet::new()).unwrap_err();
+    let error = compute_affected(
+        graph("workspace"),
+        &[],
+        &["[abc".into()],
+        &HashSet::<String>::new(),
+    )
+    .unwrap_err();
     assert!(matches!(
         error,
         rust_affected::Error::InvalidForceTrigger(_)

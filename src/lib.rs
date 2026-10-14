@@ -1,7 +1,9 @@
 use globset::{Glob, GlobSetBuilder};
 use guppy::graph::PackageGraph;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt;
+use std::hash::BuildHasher;
 use std::path::{Component, Path, PathBuf};
 
 /// A failure while validating triggers or querying the dependency graph.
@@ -39,8 +41,10 @@ pub enum Warning {
 }
 
 /// Sorted workspace-member names and diagnostics from affected-file analysis.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Serialization includes the four action outputs; warnings remain diagnostics.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct AffectedResult {
+    #[serde(skip)]
     pub warnings: Vec<Warning>,
     pub force_all: bool,
     pub changed_crates: Vec<String>,
@@ -83,6 +87,7 @@ fn exclusion_matches(entry: &str, name: &str, directory: &Path) -> bool {
 
 /// Match normalized workspace-relative paths against force-trigger globs.
 ///
+/// # Errors
 /// Returns an error for invalid patterns, even when there are no files.
 pub fn check_force_triggers(
     changed_files: &[String],
@@ -96,7 +101,7 @@ pub fn check_force_triggers(
     for trigger in force_triggers {
         let trigger = trigger.trim_start_matches("./");
         let pattern = if trigger.ends_with('/') {
-            format!("{}**", trigger)
+            format!("{trigger}**")
         } else {
             trigger.to_string()
         };
@@ -112,8 +117,8 @@ pub fn check_force_triggers(
 /// exclusive: a crate with a binary target appears only in `affected_binary_members`,
 /// while pure library crates appear only in `affected_library_members`.
 ///
-/// `excluded` filters crate names from all three output lists (changed_crates,
-/// affected_library_members, affected_binary_members) but does **not** prune the
+/// `excluded` filters crate names from all three output lists (`changed_crates`,
+/// `affected_library_members`, `affected_binary_members`) but does **not** prune the
 /// dependency graph traversal. An excluded crate is still traversed when resolving
 /// transitive dependents — it simply won't appear in the results.
 ///
@@ -128,11 +133,11 @@ pub fn check_force_triggers(
 ///
 /// # Errors
 /// Returns an error for invalid force-trigger patterns or failed graph queries.
-pub fn compute_affected(
+pub fn compute_affected<S: BuildHasher>(
     graph: &PackageGraph,
     changed_files: &[String],
     force_triggers: &[String],
-    excluded: &HashSet<String>,
+    excluded: &HashSet<String, S>,
 ) -> Result<AffectedResult, Error> {
     let workspace = graph.workspace();
     let mut warnings = Vec::new();
@@ -189,48 +194,30 @@ pub fn compute_affected(
             .resolve()
     };
 
-    let mut changed_crates: Vec<String> = direct_ids
-        .iter()
-        .map(|id| graph.metadata(id))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Error::Graph)?
-        .into_iter()
-        .filter(|pkg| workspace.contains_name(pkg.name()) && !excluded_ids.contains(pkg.id()))
-        .map(|pkg| pkg.name().to_string())
-        .collect();
-    changed_crates.sort();
-
-    let mut affected_library_members: Vec<String> = affected_set
-        .packages(guppy::graph::DependencyDirection::Forward)
-        .filter(|pkg| {
-            workspace.contains_name(pkg.name())
-                && !excluded_ids.contains(pkg.id())
-                && !pkg
-                    .build_targets()
-                    .any(|t| matches!(t.id(), guppy::graph::BuildTargetId::Binary(_)))
-        })
-        .map(|pkg| pkg.name().to_string())
-        .collect();
-    affected_library_members.sort();
-
-    let mut affected_binary_members: Vec<String> = affected_set
-        .packages(guppy::graph::DependencyDirection::Forward)
-        .filter(|pkg| {
-            workspace.contains_name(pkg.name())
-                && !excluded_ids.contains(pkg.id())
-                && pkg
-                    .build_targets()
-                    .any(|t| matches!(t.id(), guppy::graph::BuildTargetId::Binary(_)))
-        })
-        .map(|pkg| pkg.name().to_string())
-        .collect();
-    affected_binary_members.sort();
-
-    Ok(AffectedResult {
+    let mut result = AffectedResult {
         warnings,
         force_all,
-        changed_crates,
-        affected_library_members,
-        affected_binary_members,
-    })
+        ..AffectedResult::default()
+    };
+    for pkg in affected_set.packages(guppy::graph::DependencyDirection::Forward) {
+        if !pkg.in_workspace() || excluded_ids.contains(pkg.id()) {
+            continue;
+        }
+        if direct_ids.contains(pkg.id()) {
+            result.changed_crates.push(pkg.name().to_string());
+        }
+        let members = if pkg
+            .build_targets()
+            .any(|target| matches!(target.id(), guppy::graph::BuildTargetId::Binary(_)))
+        {
+            &mut result.affected_binary_members
+        } else {
+            &mut result.affected_library_members
+        };
+        members.push(pkg.name().to_string());
+    }
+    result.changed_crates.sort();
+    result.affected_library_members.sort();
+    result.affected_binary_members.sort();
+    Ok(result)
 }
