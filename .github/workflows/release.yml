@@ -299,6 +299,9 @@ jobs:
           # Digest of the image this run pushed (empty if the build never pushed); the only image rollback may delete.
           BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
+          # The runner starts bash with -eo pipefail. Rollback must run every item and report, so errexit is
+          # turned off explicitly here; every command's status is handled by hand below.
+          set +e
           set -uo pipefail
           FAILED=0
           note() { echo "::warning::$*"; }
@@ -460,7 +463,8 @@ jobs:
             if [[ -n "$DIGEST" ]]; then
               PRESERVE=0
               for REF in "refs/tags/${MAJOR_TAG}" "refs/tags/${NEW_TAG}" refs/heads/main; do
-                ref_pins_digest "$REF" "$DIGEST"; RC=$?
+                RC=0
+                ref_pins_digest "$REF" "$DIGEST" || RC=$?
                 if [[ "$RC" == 0 ]]; then
                   fail "${REF} pins the ${NEW_TAG} image (${DIGEST}); preserving it."
                   PRESERVE=1
