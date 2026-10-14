@@ -36,10 +36,10 @@ fn force_all_filters_external_packages_by_identity() {
         &[],
     );
     assert!(result.force_all);
-    assert!(result.changed_crates.is_empty());
+    assert_eq!(result.changed_crates, Vec::<String>::new());
     assert_eq!(result.affected_library_members, ["consumer", "shared"]);
-    assert!(result.affected_binary_members.is_empty());
-    assert!(result.warnings.is_empty());
+    assert_eq!(result.affected_binary_members, Vec::<String>::new());
+    assert_eq!(result.warnings, Vec::<rust_affected::Warning>::new());
 }
 
 #[test]
@@ -51,10 +51,10 @@ fn excluding_a_member_does_not_leak_an_external_namesake() {
         &["shared"],
     );
     assert!(result.force_all);
-    assert!(result.changed_crates.is_empty());
+    assert_eq!(result.changed_crates, Vec::<String>::new());
     assert_eq!(result.affected_library_members, ["consumer"]);
-    assert!(result.affected_binary_members.is_empty());
-    assert!(result.warnings.is_empty());
+    assert_eq!(result.affected_binary_members, Vec::<String>::new());
+    assert_eq!(result.warnings, Vec::<rust_affected::Warning>::new());
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn exclusions_support_a_non_default_hasher() {
     )
     .unwrap();
     assert_lists(&result, &[], &["consumer"], &[]);
-    assert!(result.warnings.is_empty());
+    assert_eq!(result.warnings, Vec::<rust_affected::Warning>::new());
 }
 
 fn compute(name: &str, files: &[&str], triggers: &[&str], excluded: &[&str]) -> AffectedResult {
@@ -363,15 +363,13 @@ fn warnings_are_deterministic_and_checked_against_all_members() {
             Warning::UnmatchedExclusion("unknown".into()),
         ]
     );
-    assert!(
-        compute("workspace", &[], &[], &["tools/", "./tools/", "lib-core"])
-            .warnings
-            .is_empty()
+    assert_eq!(
+        compute("workspace", &[], &[], &["tools/", "./tools/", "lib-core"]).warnings,
+        Vec::<rust_affected::Warning>::new()
     );
-    assert!(
-        compute("workspace", &["lib-core/src/lib.rs"], &[], &[])
-            .warnings
-            .is_empty()
+    assert_eq!(
+        compute("workspace", &["lib-core/src/lib.rs"], &[], &[]).warnings,
+        Vec::<rust_affected::Warning>::new()
     );
 }
 

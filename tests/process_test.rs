@@ -71,7 +71,7 @@ fn run(cwd: &Path, envs: &[(&str, &str)]) -> Output {
 fn assert_error(output: &Output, message: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, Vec::<u8>::new());
     assert_eq!(
         stderr
             .lines()
@@ -476,6 +476,9 @@ fn output_bytes_match_stage_three_in_both_modes() {
             std::fs::write(&output_path, "existing=value\n").unwrap();
             std::fs::write(&summary_path, "existing summary\n").unwrap();
             let mut cmd = command(&workspace);
+            // Keep unrelated Cargo processes from adding package-cache lock notices.
+            // This fixture has only local dependencies, so an empty cache is sufficient.
+            cmd.env("CARGO_HOME", scratch.0.join("cargo-home"));
             cmd.env("CHANGED_FILES", changed)
                 .env("FORCE_TRIGGERS", trigger)
                 .env("EXCLUDED_MEMBERS", excluded)
