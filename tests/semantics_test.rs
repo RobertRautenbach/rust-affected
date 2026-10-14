@@ -6,10 +6,12 @@ fn graph(name: &str) -> &'static PackageGraph {
     static ROOT: OnceLock<PackageGraph> = OnceLock::new();
     static NESTED: OnceLock<PackageGraph> = OnceLock::new();
     static VIRTUAL: OnceLock<PackageGraph> = OnceLock::new();
+    static COLLISION: OnceLock<PackageGraph> = OnceLock::new();
     let slot = match name {
         "root-package" => &ROOT,
         "nested-package" => &NESTED,
         "workspace" => &VIRTUAL,
+        "name-collision/workspace" => &COLLISION,
         _ => panic!("unknown fixture"),
     };
     slot.get_or_init(|| {
@@ -23,6 +25,42 @@ fn graph(name: &str) -> &'static PackageGraph {
             .build_graph()
             .unwrap()
     })
+}
+
+#[test]
+fn force_all_filters_external_packages_by_identity() {
+    let result = compute(
+        "name-collision/workspace",
+        &["Cargo.toml"],
+        &["Cargo.toml"],
+        &[],
+    );
+    assert!(result.force_all);
+    assert!(result.changed_crates.is_empty());
+    assert_eq!(result.affected_library_members, ["consumer", "shared"]);
+    assert!(result.affected_binary_members.is_empty());
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn excluding_a_member_does_not_leak_an_external_namesake() {
+    let result = compute(
+        "name-collision/workspace",
+        &["Cargo.toml"],
+        &["Cargo.toml"],
+        &["shared"],
+    );
+    assert!(result.force_all);
+    assert!(result.changed_crates.is_empty());
+    assert_eq!(result.affected_library_members, ["consumer"]);
+    assert!(result.affected_binary_members.is_empty());
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn ordinary_changes_with_external_namesakes_keep_reverse_dependents() {
+    let result = compute("name-collision/workspace", &["member/src/lib.rs"], &[], &[]);
+    assert_lists(result, &["shared"], &["consumer", "shared"], &[]);
 }
 
 fn compute(name: &str, files: &[&str], triggers: &[&str], excluded: &[&str]) -> AffectedResult {

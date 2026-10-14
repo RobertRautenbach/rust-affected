@@ -1,0 +1,17 @@
+existing summary
+## rust-affected
+
+| | Crates |
+|---|---|
+| **Changed** | `sub-lib` |
+| **Affected libraries** | `sub-lib` |
+| **Affected binaries** | `root-app` |
+
+### Changed crates
+- `sub-lib`
+
+### Affected library members
+- `sub-lib`
+
+### Affected binary members
+- `root-app`
