@@ -194,3 +194,318 @@ fn metadata_preserves_existing_compiler_cache() {
     );
     assert_eq!(std::fs::read(cache).unwrap(), original);
 }
+
+#[test]
+fn stale_locks_fail_without_rewriting_from_root_or_member() {
+    for directory in ["", "member"] {
+        for changed in ["", "member/src/lib.rs"] {
+            let scratch = Scratch::workspace();
+            let lock = scratch.0.join("Cargo.lock");
+            std::fs::write(&lock, "version = 4\n").unwrap();
+            let output = run(&scratch.0.join(directory), &[("CHANGED_FILES", changed)]);
+            assert_error(&output, "lock file");
+            assert_eq!(std::fs::read_to_string(lock).unwrap(), "version = 4\n");
+        }
+    }
+}
+
+#[test]
+fn missing_locks_warn_and_are_created_even_without_changes() {
+    for directory in ["", "member"] {
+        for changed in ["", "member/src/lib.rs"] {
+            let scratch = Scratch::workspace();
+            let output = run(&scratch.0.join(directory), &[("CHANGED_FILES", changed)]);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
+            assert!(
+                stderr.contains("::warning::No Cargo.lock in the workspace root"),
+                "{stderr}"
+            );
+            assert!(scratch.0.join("Cargo.lock").is_file());
+            assert!(!scratch.0.join("member/Cargo.lock").exists());
+        }
+    }
+}
+
+#[test]
+fn valid_locks_are_preserved_without_a_missing_lock_warning() {
+    let scratch = Scratch::workspace();
+    let lock = scratch.0.join("Cargo.lock");
+    std::fs::write(
+        &lock,
+        "version = 4\n\n[[package]]\nname = \"member\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let original = std::fs::read(&lock).unwrap();
+    for directory in ["", "member"] {
+        let output = run(
+            &scratch.0.join(directory),
+            &[("CHANGED_FILES", "member/src/lib.rs")],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("::warning::"));
+        assert_eq!(std::fs::read(&lock).unwrap(), original);
+    }
+}
+
+#[test]
+fn cargo_errors_are_forwarded_without_color_and_outputs_are_untouched() {
+    let scratch = Scratch::new();
+    let output_path = scratch.0.join("output");
+    let summary_path = scratch.0.join("summary");
+    std::fs::write(&output_path, "sentinel\n").unwrap();
+    std::fs::write(&summary_path, "sentinel\n").unwrap();
+    let output = command(&scratch.0)
+        .env("CHANGED_FILES", "x")
+        .env("CARGO_TERM_COLOR", "always")
+        .env("RUSTUP_TERM_COLOR", "always")
+        .env("GITHUB_OUTPUT", &output_path)
+        .env("GITHUB_STEP_SUMMARY", &summary_path)
+        .output()
+        .unwrap();
+    assert_error(&output, "could not find");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("error: could not find")),
+        "{stderr}"
+    );
+    assert!(!output.stderr.contains(&0x1b));
+    assert_eq!(std::fs::read_to_string(output_path).unwrap(), "sentinel\n");
+    assert_eq!(std::fs::read_to_string(summary_path).unwrap(), "sentinel\n");
+}
+
+#[test]
+fn missing_cargo_executable_is_a_handled_error() {
+    let scratch = Scratch::new();
+    let output = command(&fixture())
+        .env("CHANGED_FILES", "x")
+        .env("CARGO", scratch.0.join("missing-cargo"))
+        .output()
+        .unwrap();
+    assert_error(&output, "failed to start cargo locate-project");
+}
+
+#[cfg(unix)]
+#[test]
+fn lock_inspection_errors_do_not_enable_unlocked_resolution() {
+    let scratch = Scratch::workspace();
+    std::os::unix::fs::symlink("Cargo.lock", scratch.0.join("Cargo.lock")).unwrap();
+    let output = run(&scratch.0, &[("CHANGED_FILES", "member/src/lib.rs")]);
+    assert_error(&output, "failed to inspect workspace Cargo.lock");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("No Cargo.lock"));
+}
+
+#[cfg(unix)]
+fn fake_cargo(scratch: &Scratch, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = scratch.0.join("cargo");
+    std::fs::write(&path, format!("#!/bin/sh\nif [ \"$1\" = locate-project ]; then\n  printf '%s\\n' \"$FAKE_MANIFEST\"\n  exit 0\nfi\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn malformed_metadata_and_failed_cargo_have_context() {
+    let scratch = Scratch::new();
+    for (script, message) in [
+        ("printf '{invalid json}\\n'", "invalid cargo metadata"),
+        ("printf 'no JSON\\n'", "cargo metadata returned no JSON"),
+        ("printf '\\377'", "cargo metadata output is not valid UTF-8"),
+        (
+            "printf 'notice\\nerror: broken 100%%\\n' >&2; exit 7",
+            "::error::cargo metadata failed: error: broken 100%25",
+        ),
+        ("exit 7", "cargo metadata failed: exit status: 7"),
+    ] {
+        let executable = fake_cargo(&scratch, script);
+        let output = command(&fixture())
+            .env("CHANGED_FILES", "x")
+            .env("CARGO", executable)
+            .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
+            .output()
+            .unwrap();
+        assert_error(&output, message);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn successful_cargo_stderr_is_forwarded_and_graph_errors_are_handled() {
+    let scratch = Scratch::new();
+    let metadata = Command::new(env!("CARGO"))
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--all-features",
+            "--locked",
+            "--offline",
+        ])
+        .current_dir(fixture())
+        .env("CARGO_CACHE_RUSTC_INFO", "0")
+        .output()
+        .unwrap();
+    assert!(metadata.status.success());
+    let metadata_path = scratch.0.join("metadata.json");
+    let executable = fake_cargo(
+        &scratch,
+        r#"
+[ "$CARGO_TERM_COLOR" = never ] && [ "$RUSTUP_TERM_COLOR" = never ] && [ "$CARGO_CACHE_RUSTC_INFO" = 0 ] || exit 8
+[ "$*" = 'metadata --format-version 1 --all-features --locked' ] || exit 9
+printf 'cargo notice: retained\n' >&2
+printf 'prelude before JSON\n'
+cat "$FAKE_METADATA"
+"#,
+    );
+    for valid_graph in [true, false] {
+        let mut json: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        if !valid_graph {
+            json["workspace_members"] = serde_json::json!(["missing-package-id"]);
+        }
+        std::fs::write(&metadata_path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let output = command(&fixture())
+            .env("CHANGED_FILES", "lib-core/src/lib.rs")
+            .env("CARGO", &executable)
+            .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
+            .env("FAKE_METADATA", &metadata_path)
+            .env("CARGO_TERM_COLOR", "always")
+            .env("RUSTUP_TERM_COLOR", "always")
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .any(|line| line == "cargo notice: retained")
+        );
+        if valid_graph {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(json["changed_crates"], serde_json::json!(["lib-core"]));
+        } else {
+            assert_error(&output, "failed to build package graph");
+        }
+    }
+}
+
+#[test]
+fn results_are_echoed_and_summary_is_appended_in_both_modes() {
+    for (changed, trigger) in [
+        ("", ""),
+        ("app-alpha/src/main.rs", ""),
+        ("Cargo.lock", "Cargo.lock"),
+    ] {
+        for file_output in [false, true] {
+            let scratch = Scratch::new();
+            let output_path = scratch.0.join("output");
+            let summary_path = scratch.0.join("summary");
+            std::fs::write(&output_path, "existing=value\n").unwrap();
+            std::fs::write(&summary_path, "existing summary\n").unwrap();
+            let mut cmd = command(&fixture());
+            cmd.env("CHANGED_FILES", changed)
+                .env("FORCE_TRIGGERS", trigger)
+                .env("GITHUB_STEP_SUMMARY", &summary_path);
+            if file_output {
+                cmd.env("GITHUB_OUTPUT", &output_path);
+            }
+            let output = cmd.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if file_output {
+                let content = std::fs::read_to_string(output_path).unwrap();
+                assert_eq!(
+                    content.strip_prefix("existing=value\n").unwrap().as_bytes(),
+                    output.stdout
+                );
+                assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 4);
+            } else {
+                serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+            }
+            let summary = std::fs::read_to_string(summary_path).unwrap();
+            assert!(summary.starts_with("existing summary\n"));
+            for text in [
+                "## rust-affected",
+                "| **Changed** |",
+                "| **Affected libraries** |",
+                "| **Affected binaries** |",
+                "### Changed crates",
+                "### Affected library members",
+                "### Affected binary members",
+            ] {
+                assert!(summary.contains(text), "{summary}");
+            }
+            assert_eq!(summary.contains("[!WARNING]"), !trigger.is_empty());
+            if changed.is_empty() {
+                assert_eq!(summary.matches("_none_").count(), 3);
+            }
+            if changed.starts_with("app-alpha") {
+                assert!(summary.contains("| **Changed** | `app-alpha` |"));
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_summary_does_not_publish_outputs() {
+    let scratch = Scratch::new();
+    let output_path = scratch.0.join("output");
+    std::fs::write(&output_path, "sentinel\n").unwrap();
+    let output = command(&fixture())
+        .env("CHANGED_FILES", "x")
+        .env("GITHUB_OUTPUT", &output_path)
+        .env("GITHUB_STEP_SUMMARY", &scratch.0)
+        .output()
+        .unwrap();
+    assert_error(&output, "GITHUB_STEP_SUMMARY");
+    assert_eq!(std::fs::read_to_string(output_path).unwrap(), "sentinel\n");
+}
+
+// macOS filesystems require UTF-8 filenames; Linux permits arbitrary bytes.
+#[cfg(target_os = "linux")]
+#[test]
+fn output_locations_can_be_non_utf8_paths() {
+    use std::os::unix::ffi::OsStrExt;
+    let scratch = Scratch::new();
+    let path = scratch.0.join(OsStr::from_bytes(b"output-\xff"));
+    std::fs::write(&path, "").unwrap();
+    let output = command(&fixture())
+        .env("CHANGED_FILES", "app-alpha/src/main.rs")
+        .env("GITHUB_OUTPUT", &path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(std::fs::read(path).unwrap(), output.stdout);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_output_write_failures_exit_one() {
+    for destination in ["GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "stdout"] {
+        let mut cmd = command(&fixture());
+        cmd.env("CHANGED_FILES", "app-alpha/src/main.rs");
+        if destination == "stdout" {
+            cmd.stdout(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open("/dev/full")
+                    .unwrap(),
+            );
+        } else {
+            cmd.env(destination, "/dev/full");
+        }
+        assert_error(&cmd.output().unwrap(), destination);
+    }
+}

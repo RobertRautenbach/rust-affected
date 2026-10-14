@@ -1,9 +1,11 @@
-use guppy::{MetadataCommand, graph::PackageGraph};
+use guppy::{CargoMetadata, MetadataCommand, graph::PackageGraph};
 use rust_affected::{AffectedResult, Warning, compute_affected};
 use std::{
     env,
     fs::File,
     io::{self, Write},
+    path::Path,
+    process::Command,
 };
 
 fn main() {
@@ -45,25 +47,81 @@ fn run() -> Result<(), String> {
             "changed_files is empty; no files will be attributed. If files did change, check the step producing changed_files. Workspace and configuration validation still run.",
         )?;
     }
-    let mut command = MetadataCommand::new();
-    // Metadata must not rewrite a consumer's compiler-version cache in target/.
-    command.env("CARGO_CACHE_RUSTC_INFO", "0");
-    let graph = PackageGraph::from_command(&mut command)
-        .map_err(|error| format!("cargo metadata failed: {}", error_chain(&error)))?;
+    let graph = load_graph()?;
     let result = compute_affected(&graph, &changed_files, &force_triggers, &excluded)
         .map_err(|error| error.to_string())?;
     emit_warnings(&result.warnings)?;
     emit_output(&result)
 }
 
-fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(error) = source {
-        message.push_str(&format!(": {error}"));
-        source = error.source();
+fn run_cargo(command: &mut Command, operation: &str) -> Result<Vec<u8>, String> {
+    // Metadata can otherwise rewrite target/.rustc_info.json in the checkout.
+    command
+        .env("CARGO_CACHE_RUSTC_INFO", "0")
+        .env("CARGO_TERM_COLOR", "never")
+        .env("RUSTUP_TERM_COLOR", "never");
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to start cargo {operation}: {error}"))?;
+    let mut stderr = io::stderr().lock();
+    stderr
+        .write_all(&output.stderr)
+        .map_err(|error| format!("failed to forward cargo stderr: {error}"))?;
+    // Keep a subsequent annotation on its own line even if Cargo omitted a newline.
+    if !output.stderr.is_empty() && !output.stderr.ends_with(b"\n") {
+        stderr
+            .write_all(b"\n")
+            .map_err(|error| format!("failed to forward cargo stderr: {error}"))?;
     }
-    message
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr);
+        let detail = message
+            .lines()
+            .find(|line| line.trim_start().starts_with("error"))
+            .or_else(|| message.lines().find(|line| !line.trim().is_empty()))
+            .map(str::to_owned)
+            .unwrap_or_else(|| output.status.to_string());
+        return Err(format!("cargo {operation} failed: {detail}"));
+    }
+    Ok(output.stdout)
+}
+
+fn load_graph() -> Result<PackageGraph, String> {
+    let mut metadata = MetadataCommand::new();
+    // Discover the lock next to the workspace manifest, even when run in a member.
+    let mut locate = Command::new(metadata.cargo_command().get_program());
+    locate.args(["locate-project", "--workspace", "--message-format", "plain"]);
+    let manifest = String::from_utf8(run_cargo(&mut locate, "locate-project")?)
+        .map_err(|_| "cargo locate-project output is not valid UTF-8".to_string())?;
+    let manifest = Path::new(manifest.trim_end_matches(['\r', '\n']));
+    if !manifest.is_absolute() {
+        return Err("cargo locate-project returned no absolute workspace manifest path".into());
+    }
+    let root = manifest
+        .parent()
+        .ok_or("cargo locate-project returned an invalid workspace manifest path")?;
+    if root
+        .join("Cargo.lock")
+        .try_exists()
+        .map_err(|error| format!("failed to inspect workspace Cargo.lock: {error}"))?
+    {
+        metadata.other_options(["--locked"]);
+    } else {
+        annotation(
+            "warning",
+            "No Cargo.lock in the workspace root; cargo metadata will resolve dependencies and may create one (owned by root inside the action). Commit Cargo.lock to use --locked.",
+        )?;
+    }
+    let stdout = String::from_utf8(run_cargo(&mut metadata.cargo_command(), "metadata")?)
+        .map_err(|_| "cargo metadata output is not valid UTF-8".to_string())?;
+    let json = stdout
+        .lines()
+        .find(|line| line.starts_with('{'))
+        .ok_or("cargo metadata returned no JSON")?;
+    CargoMetadata::parse_json(json)
+        .map_err(|error| format!("invalid cargo metadata: {error}"))?
+        .build_graph()
+        .map_err(|error| format!("failed to build package graph: {error}"))
 }
 
 fn emit_warnings(warnings: &[Warning]) -> Result<(), String> {
@@ -141,9 +199,8 @@ fn emit_output(result: &AffectedResult) -> Result<(), String> {
     if let Some(file) = &mut summary_file {
         write_destination(file, &summary, "GITHUB_STEP_SUMMARY")?;
     }
-    if output_file.is_none() {
-        write_destination(&mut io::stdout().lock(), &json, "stdout")?;
-    }
+    let log = if output_file.is_some() { &lines } else { &json };
+    write_destination(&mut io::stdout().lock(), log, "stdout")?;
     Ok(())
 }
 
