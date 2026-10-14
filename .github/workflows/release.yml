@@ -30,6 +30,10 @@ jobs:
   # Step order: everything reversible first, consumer-visible mutations
   # (git vX tag, GHCR vX/latest tags) as late as possible, and the one
   # irreversible mutation (publishing the immutable GitHub release) last.
+  #
+  # Every lookup that the rollback relies on distinguishes "confirmed absent"
+  # from "lookup failed": a failed lookup aborts before anything is mutated,
+  # and during rollback it is reported rather than treated as absence.
   release:
     name: Build, push & release
     needs: test
@@ -41,6 +45,7 @@ jobs:
       packages: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PACKAGE: rust-affected
     steps:
       - uses: actions/checkout@v7
         with:
@@ -68,7 +73,7 @@ jobs:
             echo "NEW_TAG=v${MAJOR}.${MINOR}.${PATCH}"
             echo "MAJOR_TAG=v${MAJOR}"
             echo "OWNER=${OWNER}"
-            echo "IMAGE=ghcr.io/${OWNER}/rust-affected"
+            echo "IMAGE=ghcr.io/${OWNER}/${PACKAGE}"
           } >> "$GITHUB_ENV"
           echo "Last tag: ${LAST_TAG}; new tag: v${MAJOR}.${MINOR}.${PATCH}; major tag: v${MAJOR}"
 
@@ -86,15 +91,45 @@ jobs:
           fi
           printf 'Changed files since %s:\n%s\n' "$LAST_TAG" "$DIFF"
 
-      - name: Preflight checks and record previous git tag target
+      - name: Preflight checks and record previous targets
         run: |
           set -euo pipefail
-          if git ls-remote --exit-code origin "refs/tags/${NEW_TAG}" >/dev/null; then
+          # Prints "published", "draft" or "absent" for ${NEW_TAG}; returns 1 if the lookup itself failed.
+          release_state() {
+            local drafts
+            drafts=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${NEW_TAG}\") | .draft") || return 1
+            case "$drafts" in
+              "")      echo absent ;;
+              *false*) echo published ;;
+              *)       echo draft ;;
+            esac
+          }
+          # Prints the digest of the GHCR package version carrying tag $1 (empty if none); returns 1 if the lookup failed.
+          ghcr_digest_for_tag() {
+            local out err
+            err=$(mktemp)
+            if ! out=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                --jq ".[] | select(any(.metadata.container.tags[]; . == \"$1\")) | .name" 2>"$err"); then
+              if grep -q 'HTTP 404' "$err"; then
+                out=""   # the package does not exist yet: confirmed absence
+              else
+                cat "$err" >&2; rm -f "$err"; return 1
+              fi
+            fi
+            rm -f "$err"
+            [[ -z "$out" || "$out" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+            printf '%s' "$out"
+          }
+
+          EXISTING=$(git ls-remote origin "refs/tags/${NEW_TAG}")
+          if [[ -n "$EXISTING" ]]; then
             echo "::error::Tag ${NEW_TAG} already exists on origin."
             exit 1
           fi
-          if gh release view "${NEW_TAG}" >/dev/null 2>&1; then
-            echo "::error::A release named ${NEW_TAG} already exists (immutable releases: tag names cannot be reused)."
+          STATE=$(release_state) || { echo "::error::Could not determine whether a release named ${NEW_TAG} exists."; exit 1; }
+          if [[ "$STATE" != "absent" ]]; then
+            echo "::error::A release named ${NEW_TAG} already exists (${STATE}). Immutable releases: tag names cannot be reused."
             exit 1
           fi
           case "$(gh api "users/${OWNER}" --jq .type)" in
@@ -103,11 +138,17 @@ jobs:
             *) echo "::error::Cannot determine owner type for ${OWNER}."; exit 1 ;;
           esac
           PREV_MAJOR_SHA=$(git ls-remote origin "refs/tags/${MAJOR_TAG}" | awk 'NR==1 {print $1}')
+          PREV_MAJOR_DIGEST=$(ghcr_digest_for_tag "${MAJOR_TAG}") \
+            || { echo "::error::Could not look up which image currently carries the ${MAJOR_TAG} tag in GHCR."; exit 1; }
+          PREV_LATEST_DIGEST=$(ghcr_digest_for_tag latest) \
+            || { echo "::error::Could not look up which image currently carries the latest tag in GHCR."; exit 1; }
           {
             echo "PKG_API=${PKG_API}"
             echo "PREV_MAJOR_SHA=${PREV_MAJOR_SHA}"
+            echo "PREV_MAJOR_DIGEST=${PREV_MAJOR_DIGEST}"
+            echo "PREV_LATEST_DIGEST=${PREV_LATEST_DIGEST}"
           } >> "$GITHUB_ENV"
-          echo "Previous ${MAJOR_TAG} target: ${PREV_MAJOR_SHA:-<none>}"
+          echo "Previous ${MAJOR_TAG}: commit ${PREV_MAJOR_SHA:-<none>}, image ${PREV_MAJOR_DIGEST:-<none>}; previous latest image: ${PREV_LATEST_DIGEST:-<none>}"
 
       - name: Login to GHCR
         uses: docker/login-action@v4
@@ -121,20 +162,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-
-      - name: Record previous image tag targets
-        run: |
-          set -euo pipefail
-          digest_of() {
-            docker buildx imagetools inspect "${IMAGE}:$1" --format '{{.Manifest.Digest}}' 2>/dev/null || true
-          }
-          PREV_MAJOR_DIGEST=$(digest_of "${MAJOR_TAG}")
-          PREV_LATEST_DIGEST=$(digest_of latest)
-          {
-            echo "PREV_MAJOR_DIGEST=${PREV_MAJOR_DIGEST}"
-            echo "PREV_LATEST_DIGEST=${PREV_LATEST_DIGEST}"
-          } >> "$GITHUB_ENV"
-          echo "Previous ${MAJOR_TAG} image: ${PREV_MAJOR_DIGEST:-<none>}; previous latest image: ${PREV_LATEST_DIGEST:-<none>}"
 
       - name: Build and push image (version tag only)
         id: build
@@ -171,15 +198,15 @@ jobs:
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Invalid IMAGE_DIGEST '${IMAGE_DIGEST}'"; exit 1; }
 
           # action.yml: rewrite the single image line, whether it currently ends in ":tag" or ":tag@sha256:...".
-          sed -E -i "s|^(  image: 'docker://ghcr\.io/${OWNER}/rust-affected):[^'@]+(@sha256:[0-9a-f]{64})?'\$|\1:${NEW_TAG}@${IMAGE_DIGEST}'|" action.yml
-          grep -qF "image: 'docker://ghcr.io/${OWNER}/rust-affected:${NEW_TAG}@${IMAGE_DIGEST}'" action.yml \
+          sed -E -i "s|^(  image: 'docker://ghcr\.io/${OWNER}/${PACKAGE}):[^'@]+(@sha256:[0-9a-f]{64})?'\$|\1:${NEW_TAG}@${IMAGE_DIGEST}'|" action.yml
+          grep -qF "image: 'docker://ghcr.io/${OWNER}/${PACKAGE}:${NEW_TAG}@${IMAGE_DIGEST}'" action.yml \
             || { echo "::error::action.yml image line was not rewritten."; exit 1; }
           [[ "$(grep -c '^  image: ' action.yml)" == 1 ]] \
             || { echo "::error::Expected exactly one image: line in action.yml."; exit 1; }
 
           # README.md: only full vMAJOR.MINOR.PATCH references are bumped; "@v3" in the migration example is untouched.
-          sed -E -i "s|(${OWNER}/rust-affected@)v[0-9]+\.[0-9]+\.[0-9]+|\1${NEW_TAG}|g" README.md
-          if grep -nE "${OWNER}/rust-affected@v[0-9]+\.[0-9]+\.[0-9]+" README.md | grep -vF "@${NEW_TAG}"; then
+          sed -E -i "s|(${OWNER}/${PACKAGE}@)v[0-9]+\.[0-9]+\.[0-9]+|\1${NEW_TAG}|g" README.md
+          if grep -nE "${OWNER}/${PACKAGE}@v[0-9]+\.[0-9]+\.[0-9]+" README.md | grep -vF "@${NEW_TAG}"; then
             echo "::error::README.md still contains stale full-version references."
             exit 1
           fi
@@ -215,7 +242,8 @@ jobs:
       - name: Move git major tag
         run: |
           set -euo pipefail
-          git push --force origin "${RELEASE_COMMIT}:refs/tags/${MAJOR_TAG}"
+          # The lease requires the tag to still point at its recorded previous target (or not to exist yet).
+          git push --force-with-lease="refs/tags/${MAJOR_TAG}:${PREV_MAJOR_SHA}" origin "${RELEASE_COMMIT}:refs/tags/${MAJOR_TAG}"
           NOW=$(git ls-remote origin "refs/tags/${MAJOR_TAG}" | awk 'NR==1 {print $1}')
           if [[ "$NOW" != "$RELEASE_COMMIT" ]]; then
             echo "::error::${MAJOR_TAG} points at ${NOW}, expected ${RELEASE_COMMIT}."
@@ -245,28 +273,66 @@ jobs:
           FAILED=0
           note() { echo "::warning::$*"; }
           fail() { echo "::error::$*"; FAILED=1; }
+          # Prints "published", "draft" or "absent" for ${NEW_TAG}; returns 1 if the lookup itself failed.
+          release_state() {
+            local drafts
+            drafts=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${NEW_TAG}\") | .draft") || return 1
+            case "$drafts" in
+              "")      echo absent ;;
+              *false*) echo published ;;
+              *)       echo draft ;;
+            esac
+          }
+          # Prints the digest of the GHCR package version carrying tag $1 (empty if none); returns 1 if the lookup failed.
+          ghcr_digest_for_tag() {
+            local out err
+            err=$(mktemp)
+            if ! out=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                --jq ".[] | select(any(.metadata.container.tags[]; . == \"$1\")) | .name" 2>"$err"); then
+              if grep -q 'HTTP 404' "$err"; then
+                out=""
+              else
+                cat "$err" >&2; rm -f "$err"; return 1
+              fi
+            fi
+            rm -f "$err"
+            [[ -z "$out" || "$out" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+            printf '%s' "$out"
+          }
 
-          # 0. Point of no return: a published release is immutable and its tag name can never be reused.
-          if [[ -n "${NEW_TAG:-}" ]] && [[ "$(gh release view "${NEW_TAG}" --json isDraft --jq .isDraft 2>/dev/null)" == "false" ]]; then
-            fail "Release ${NEW_TAG} is already published and immutable. Not rolling back: the release is complete. Fix forward."
-            exit 1
+          # 0. Point of no return. A published release is immutable and its tag name can never be reused, so
+          #    nothing is rolled back unless the release is confirmed absent (or still a draft).
+          if [[ -n "${NEW_TAG:-}" ]]; then
+            if ! STATE=$(release_state); then
+              fail "Could not determine whether release ${NEW_TAG} was published. Refusing to roll back with an unknown publication state; check the release manually."
+              exit 1
+            fi
+            if [[ "$STATE" == "published" ]]; then
+              fail "Release ${NEW_TAG} is published and immutable. Not rolling back: the release is complete. Fix forward."
+              exit 1
+            fi
           fi
 
-          # 1. Git major tag: restore the previous target if this run moved it.
+          # 1. Git major tag: restore the previous target if this run moved it (lease: only if it still points at our commit).
           if [[ -n "${RELEASE_COMMIT:-}" ]]; then
-            CUR_MAJOR=$(git ls-remote origin "refs/tags/${MAJOR_TAG}" | awk 'NR==1 {print $1}')
-            if [[ "$CUR_MAJOR" == "$RELEASE_COMMIT" ]]; then
-              if [[ -n "${PREV_MAJOR_SHA:-}" ]]; then
-                if git push --force origin "${PREV_MAJOR_SHA}:refs/tags/${MAJOR_TAG}"; then
-                  note "Restored ${MAJOR_TAG} -> ${PREV_MAJOR_SHA}"
+            if ! LS=$(git ls-remote origin "refs/tags/${MAJOR_TAG}"); then
+              fail "Could not query origin for ${MAJOR_TAG}; not touching it."
+            else
+              CUR_MAJOR=$(printf '%s\n' "$LS" | awk 'NR==1 {print $1}')
+              if [[ "$CUR_MAJOR" == "$RELEASE_COMMIT" ]]; then
+                if [[ -n "${PREV_MAJOR_SHA:-}" ]]; then
+                  if git push --force-with-lease="refs/tags/${MAJOR_TAG}:${RELEASE_COMMIT}" origin "${PREV_MAJOR_SHA}:refs/tags/${MAJOR_TAG}"; then
+                    note "Restored ${MAJOR_TAG} -> ${PREV_MAJOR_SHA}"
+                  else
+                    fail "Could not restore ${MAJOR_TAG} -> ${PREV_MAJOR_SHA}"
+                  fi
                 else
-                  fail "Could not restore ${MAJOR_TAG} -> ${PREV_MAJOR_SHA}"
-                fi
-              else
-                if git push origin ":refs/tags/${MAJOR_TAG}"; then
-                  note "Deleted ${MAJOR_TAG} (it did not exist before this run)"
-                else
-                  fail "Could not delete ${MAJOR_TAG}"
+                  if git push --force-with-lease="refs/tags/${MAJOR_TAG}:${RELEASE_COMMIT}" origin ":refs/tags/${MAJOR_TAG}"; then
+                    note "Deleted ${MAJOR_TAG} (it did not exist before this run)"
+                  else
+                    fail "Could not delete ${MAJOR_TAG}"
+                  fi
                 fi
               fi
             fi
@@ -274,9 +340,12 @@ jobs:
 
           # 2. GHCR major/latest: re-point only those that currently point at the new image.
           if [[ -n "${IMAGE_DIGEST:-}" ]]; then
-            restore_image_tag() {  # $1 = tag, $2 = previous digest ('' = did not exist)
+            restore_image_tag() {  # $1 = tag, $2 = previous digest ('' = did not exist before this run)
               local cur
-              cur=$(docker buildx imagetools inspect "${IMAGE}:$1" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+              if ! cur=$(ghcr_digest_for_tag "$1"); then
+                fail "Could not look up ${IMAGE}:$1 in GHCR; not touching it. If it points at ${IMAGE_DIGEST}, restore it manually to ${2:-<none>}."
+                return 0
+              fi
               [[ "$cur" == "$IMAGE_DIGEST" ]] || return 0
               if [[ -n "$2" ]]; then
                 if docker buildx imagetools create --tag "${IMAGE}:$1" "${IMAGE}@$2"; then
@@ -292,19 +361,30 @@ jobs:
             restore_image_tag latest "${PREV_LATEST_DIGEST:-}"
           fi
 
-          # 3. Version tag.
-          if [[ -n "${NEW_TAG:-}" ]] && git ls-remote --exit-code origin "refs/tags/${NEW_TAG}" >/dev/null 2>&1; then
-            if git push origin ":refs/tags/${NEW_TAG}"; then
-              note "Deleted tag ${NEW_TAG}"
+          # 3. Version tag: it is only ever pushed together with the release commit, so delete it only if this run
+          #    pushed it and it still points at that commit (lease).
+          if [[ -n "${RELEASE_COMMIT:-}" ]]; then
+            if ! LS=$(git ls-remote origin "refs/tags/${NEW_TAG}"); then
+              fail "Could not query origin for ${NEW_TAG}; not touching it."
             else
-              fail "Could not delete tag ${NEW_TAG}"
+              CUR_TAG=$(printf '%s\n' "$LS" | awk 'NR==1 {print $1}')
+              if [[ "$CUR_TAG" == "$RELEASE_COMMIT" ]]; then
+                if git push --force-with-lease="refs/tags/${NEW_TAG}:${RELEASE_COMMIT}" origin ":refs/tags/${NEW_TAG}"; then
+                  note "Deleted tag ${NEW_TAG}"
+                else
+                  fail "Could not delete tag ${NEW_TAG}"
+                fi
+              elif [[ -n "$CUR_TAG" ]]; then
+                fail "Tag ${NEW_TAG} points at ${CUR_TAG}, not at this run's ${RELEASE_COMMIT}; leaving it alone."
+              fi
             fi
           fi
 
           # 4. Release commit: revert only if it actually landed on main.
           if [[ -n "${RELEASE_COMMIT:-}" ]]; then
-            git fetch -q origin main
-            if git merge-base --is-ancestor "${RELEASE_COMMIT}" origin/main; then
+            if ! git fetch -q origin main; then
+              fail "Could not fetch origin/main; cannot tell whether ${RELEASE_COMMIT} landed. Check main manually."
+            elif git merge-base --is-ancestor "${RELEASE_COMMIT}" origin/main; then
               git reset -q --hard && git checkout -q origin/main
               if git revert --no-edit "${RELEASE_COMMIT}" && git push origin HEAD:refs/heads/main; then
                 note "Reverted ${RELEASE_COMMIT} on main"
@@ -320,15 +400,18 @@ jobs:
             OWNED="\"${NEW_TAG}\""
             [[ -z "${PREV_MAJOR_DIGEST:-}" ]] && OWNED="${OWNED},\"${MAJOR_TAG}\""
             [[ -z "${PREV_LATEST_DIGEST:-}" ]] && OWNED="${OWNED},\"latest\""
-            IDS=$(gh api --paginate "${PKG_API}/packages/container/rust-affected/versions?per_page=100" \
-              --jq ".[] | select(any(.metadata.container.tags[]; . == \"${NEW_TAG}\")) | select(all(.metadata.container.tags[]; IN(${OWNED}))) | .id" 2>/dev/null)
-            for ID in $IDS; do
-              if gh api --method DELETE "${PKG_API}/packages/container/rust-affected/versions/${ID}"; then
-                note "Deleted GHCR version ${ID} (${NEW_TAG})"
-              else
-                fail "Could not delete GHCR version ${ID}; delete it manually"
-              fi
-            done
+            if ! IDS=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                --jq ".[] | select(any(.metadata.container.tags[]; . == \"${NEW_TAG}\")) | select(all(.metadata.container.tags[]; IN(${OWNED}))) | .id"); then
+              fail "Could not list GHCR versions; if the ${NEW_TAG} image was pushed, delete it manually."
+            else
+              for ID in $IDS; do
+                if gh api --method DELETE "${PKG_API}/packages/container/${PACKAGE}/versions/${ID}"; then
+                  note "Deleted GHCR version ${ID} (${NEW_TAG})"
+                else
+                  fail "Could not delete GHCR version ${ID}; delete it manually"
+                fi
+              done
+            fi
           fi
 
           if [[ "$FAILED" == 0 ]]; then
