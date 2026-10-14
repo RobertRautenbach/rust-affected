@@ -57,9 +57,10 @@ run_case() {
     -e "FORCE_TRIGGERS=${force}" \
     -e "EXCLUDED_MEMBERS=${excluded}" \
     ${1+"$@"} \
-    "${IMAGE}")" || rc=$?
+    "${IMAGE}" 2>"${tmp}/stderr")" || rc=$?
 
   if [[ "${rc}" -ne 0 ]]; then
+    cat "${tmp}/stderr" >&2
     fail "${name}: container exited with status ${rc}"
   fi
   if [[ -n "${stdout}" ]]; then
@@ -70,6 +71,39 @@ run_case() {
   fi
   if ! grep -q '^## rust-affected$' "${tmp}/step_summary"; then
     fail "${name}: GITHUB_STEP_SUMMARY has no '## rust-affected' heading"
+  fi
+  local annotations
+  annotations="$(sed -n '/^::/p' "${tmp}/stderr")"
+  if [[ "${annotations}" != "${EXPECTED_ANNOTATIONS:-}" ]]; then
+    cat "${tmp}/stderr" >&2
+    fail "${name}: unexpected annotations"
+  fi
+  rm -rf "${tmp}"
+}
+
+# run_failing_case NAME WORKSPACE CHANGED FORCE EXCLUDED ERROR_PATTERN [docker args...]
+run_failing_case() {
+  local name="$1" workspace="$2" changed="$3" force="$4" excluded="$5" pattern="$6"
+  shift 6
+  local tmp rc=0
+  CASES=$((CASES + 1))
+  echo "--- case: ${name}"
+  tmp="$(mktemp -d "${TMP_PARENT}/rust-affected-failure.XXXXXX")"
+  : > "${tmp}/set_output"
+  : > "${tmp}/step_summary"
+  docker run --rm --workdir /github/workspace \
+    -v "${workspace}:/github/workspace" -v "${tmp}:/github/file_commands" \
+    -e HOME=/github/home -e GITHUB_OUTPUT=/github/file_commands/set_output \
+    -e GITHUB_STEP_SUMMARY=/github/file_commands/step_summary \
+    -e "CHANGED_FILES=${changed}" -e "FORCE_TRIGGERS=${force}" -e "EXCLUDED_MEMBERS=${excluded}" \
+    ${1+"$@"} "${IMAGE}" >"${tmp}/stdout" 2>"${tmp}/stderr" || rc=$?
+  if [[ "${rc}" -ne 1 ]] || [[ -s "${tmp}/stdout" ]] || [[ -s "${tmp}/set_output" ]] || [[ -s "${tmp}/step_summary" ]]; then
+    cat "${tmp}/stderr" >&2
+    fail "${name}: expected exit 1 and untouched outputs; got exit ${rc}"
+  fi
+  if [[ "$(grep -c '^::error::' "${tmp}/stderr" || true)" -ne 1 ]] || ! grep -Eq "^::error::.*${pattern}" "${tmp}/stderr"; then
+    cat "${tmp}/stderr" >&2
+    fail "${name}: expected one matching error annotation"
   fi
   rm -rf "${tmp}"
 }
@@ -98,7 +132,8 @@ make_git_dependency_fixture() {
   printf '[net]\ngit-fetch-with-cli = true\n' > "${GITWS}/.cargo/config.toml"
 }
 
-fixture_before="$(snapshot "${FIXTURE}")"
+fixture_before="$(snapshot "${REPO_ROOT}/tests/fixtures")"
+EMPTY_WARNING='::warning::changed_files is empty; no files will be attributed. If files did change, check the step producing changed_files. Workspace and configuration validation still run.'
 
 run_case "leaf library change" "${FIXTURE}" \
   "lib-utils/src/lib.rs" "" "" \
@@ -121,12 +156,40 @@ affected_library_members=["lib-core","lib-core-ext","lib-utils"]
 affected_binary_members=["app-alpha","app-beta"]
 force_all=false'
 
-run_case "no changed files" "${FIXTURE}" \
+EXPECTED_ANNOTATIONS="${EMPTY_WARNING}" run_case "no changed files" "${FIXTURE}" \
   "" "" "" \
 'changed_crates=[]
 affected_library_members=[]
 affected_binary_members=[]
 force_all=false'
+
+run_case "root member ownership" "${REPO_ROOT}/tests/fixtures/root-package" \
+  "sub-lib/src/lib.rs" "" "" \
+'changed_crates=["sub-lib"]
+affected_library_members=["sub-lib"]
+affected_binary_members=["root-app"]
+force_all=false'
+
+run_case "independent nested member" "${REPO_ROOT}/tests/fixtures/nested-package" \
+  "parent/independent/src/lib.rs" "" "" \
+'changed_crates=["independent"]
+affected_library_members=["independent"]
+affected_binary_members=[]
+force_all=false'
+
+run_case "normalized changed path" "${FIXTURE}" \
+  "./lib-utils/src/lib.rs" "" "" \
+'changed_crates=["lib-utils"]
+affected_library_members=["lib-core","lib-core-ext","lib-utils"]
+affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+force_all=false'
+
+EMPTY_WS="$(mktemp -d "${TMP_PARENT}/rust-affected-empty.XXXXXX")"
+run_failing_case "missing workspace" "${EMPTY_WS}" "x" "" "" 'could not find'
+run_failing_case "empty missing workspace" "${EMPTY_WS}" "" "" "" 'could not find'
+rm -rf "${EMPTY_WS}"
+run_failing_case "invalid glob" "${FIXTURE}" "x" "[abc" "" 'invalid force_triggers pattern'
+run_failing_case "empty invalid glob" "${FIXTURE}" "" "[abc" "" 'invalid force_triggers pattern'
 
 # The dependency repository is owned by the host user while the container runs
 # as root, and git refuses to serve a repository owned by someone else unless it
@@ -146,7 +209,7 @@ rm -rf "${GITDEP}" "${GITWS}" || echo "warning: could not remove ${GITDEP} ${GIT
 # The container runs as root inside the mounted checkout. It must leave the
 # fixture workspace exactly as it found it: no Cargo.lock rewrite and no stray
 # files, including under git-ignored paths such as target/.
-fixture_after="$(snapshot "${FIXTURE}")"
+fixture_after="$(snapshot "${REPO_ROOT}/tests/fixtures")"
 if [[ "${fixture_before}" != "${fixture_after}" ]]; then
   diff -u <(printf '%s\n' "${fixture_before}") <(printf '%s\n' "${fixture_after}") >&2 || true
   fail "the container modified the fixture workspace (snapshot diff above)"

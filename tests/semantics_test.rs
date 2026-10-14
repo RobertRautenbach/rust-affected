@@ -35,6 +35,7 @@ fn compute(name: &str, files: &[&str], triggers: &[&str], excluded: &[&str]) -> 
             .map(|s| s.to_string())
             .collect::<HashSet<_>>(),
     )
+    .unwrap()
 }
 
 fn assert_lists(result: AffectedResult, changed: &[&str], libraries: &[&str], binaries: &[&str]) {
@@ -254,4 +255,48 @@ fn deleted_files_renames_and_duplicates_are_lexical() {
         &["independent", "nested", "parent"],
         &[],
     );
+}
+
+#[test]
+fn warnings_are_deterministic_and_checked_against_all_members() {
+    use rust_affected::Warning;
+    let result = compute(
+        "workspace",
+        &["../z", "../a", "../z"],
+        &[],
+        &["tools", "unknown"],
+    );
+    assert_eq!(
+        result.warnings,
+        vec![
+            Warning::UnusablePath("../a".into()),
+            Warning::UnusablePath("../z".into()),
+            Warning::UnmatchedExclusion("tools".into()),
+            Warning::UnmatchedExclusion("unknown".into()),
+        ]
+    );
+    assert!(
+        compute("workspace", &[], &[], &["tools/", "./tools/", "lib-core"])
+            .warnings
+            .is_empty()
+    );
+    assert!(
+        compute("workspace", &["lib-core/src/lib.rs"], &[], &[])
+            .warnings
+            .is_empty()
+    );
+}
+
+#[test]
+fn library_reports_invalid_globs_even_for_empty_input() {
+    use std::error::Error as _;
+    let error =
+        compute_affected(graph("workspace"), &[], &["[abc".into()], &HashSet::new()).unwrap_err();
+    assert!(matches!(
+        error,
+        rust_affected::Error::InvalidForceTrigger(_)
+    ));
+    assert!(error.source().is_some());
+    assert!(error.to_string().contains("[abc"));
+    assert!(rust_affected::check_force_triggers(&[], &["[abc".into()]).is_err());
 }
