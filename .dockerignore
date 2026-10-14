@@ -16,6 +16,9 @@ docs/
 # Tests & fixtures
 tests/
 
+# Local tooling
+scripts/
+
 # IDE & editor
 .vscode/
 .idea/

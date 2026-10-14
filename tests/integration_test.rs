@@ -93,10 +93,7 @@ fn change_isolated_lib_only_affects_its_dependent() {
     let result = compute_affected(graph, &changed, &[], &no_excludes());
 
     assert_eq!(result.changed_crates, vec!["lib-standalone"]);
-    assert_eq!(
-        result.affected_library_members,
-        vec!["lib-standalone"]
-    );
+    assert_eq!(result.affected_library_members, vec!["lib-standalone"]);
     assert_eq!(result.affected_binary_members, vec!["app-beta"]);
 }
 
@@ -122,10 +119,7 @@ fn change_multiple_crates_unions_affected() {
     let result = compute_affected(graph, &changed, &[], &no_excludes());
 
     assert_eq!(result.changed_crates, vec!["app-alpha", "lib-standalone"]);
-    assert_eq!(
-        result.affected_library_members,
-        vec!["lib-standalone"]
-    );
+    assert_eq!(result.affected_library_members, vec!["lib-standalone"]);
     assert_eq!(
         result.affected_binary_members,
         vec!["app-alpha", "app-beta"]
