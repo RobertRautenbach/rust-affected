@@ -181,7 +181,12 @@ fn metadata_preserves_existing_compiler_cache() {
     let cache = scratch.0.join("target/.rustc_info.json");
     let original = b"{\"rustc_fingerprint\":0,\"outputs\":{},\"successes\":{}}";
     std::fs::write(&cache, original).unwrap();
-    let output = run(&scratch.0, &[("CHANGED_FILES", "member/src/lib.rs")]);
+    let output = command(&scratch.0)
+        .env("CHANGED_FILES", "member/src/lib.rs")
+        .env("CARGO_TARGET_DIR", scratch.0.join("target"))
+        .env("CARGO_CACHE_RUSTC_INFO", "1")
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
