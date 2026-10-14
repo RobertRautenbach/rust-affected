@@ -121,6 +121,24 @@ jobs:
             [[ -z "$out" || "$out" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
             printf '%s' "$out"
           }
+          # Prints the highest GHCR package version id that exists right now (0 if the package does not exist);
+          # returns 1 if the lookup failed. Rollback uses it as proof that a version was created by this run.
+          ghcr_max_version_id() {
+            local out err
+            err=$(mktemp)
+            if ! out=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                --jq '[.[].id] | max // 0' 2>"$err"); then
+              if grep -q 'HTTP 404' "$err"; then
+                out="0"
+              else
+                cat "$err" >&2; rm -f "$err"; return 1
+              fi
+            fi
+            rm -f "$err"
+            out=$(printf '%s\n' "$out" | sort -n | tail -n1)
+            [[ "$out" =~ ^[0-9]+$ ]] || return 1
+            printf '%s' "$out"
+          }
 
           EXISTING=$(git ls-remote origin "refs/tags/${NEW_TAG}")
           if [[ -n "$EXISTING" ]]; then
@@ -148,11 +166,14 @@ jobs:
             || { echo "::error::Could not look up which image currently carries the ${MAJOR_TAG} tag in GHCR."; exit 1; }
           PREV_LATEST_DIGEST=$(ghcr_digest_for_tag latest) \
             || { echo "::error::Could not look up which image currently carries the latest tag in GHCR."; exit 1; }
+          PREFLIGHT_MAX_VERSION_ID=$(ghcr_max_version_id) \
+            || { echo "::error::Could not list the existing GHCR package versions."; exit 1; }
           {
             echo "PKG_API=${PKG_API}"
             echo "PREV_MAJOR_SHA=${PREV_MAJOR_SHA}"
             echo "PREV_MAJOR_DIGEST=${PREV_MAJOR_DIGEST}"
             echo "PREV_LATEST_DIGEST=${PREV_LATEST_DIGEST}"
+            echo "PREFLIGHT_MAX_VERSION_ID=${PREFLIGHT_MAX_VERSION_ID}"
           } >> "$GITHUB_ENV"
           echo "Previous ${MAJOR_TAG}: commit ${PREV_MAJOR_SHA:-<none>}, image ${PREV_MAJOR_DIGEST:-<none>}; previous latest image: ${PREV_LATEST_DIGEST:-<none>}"
 
@@ -309,6 +330,17 @@ jobs:
             [[ -z "$out" || "$out" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
             printf '%s' "$out"
           }
+          # Returns 0 if the remote ref $1 resolves (through any tag object) to a commit whose action.yml pins
+          # digest $2, 1 if it does not or the ref does not exist, 2 if that could not be determined.
+          ref_pins_digest() {
+            local found content
+            found=$(git ls-remote origin "$1") || return 2
+            [[ -z "$found" ]] && return 1
+            git fetch -q --no-tags origin "+$1:refs/rollback-check/current" || return 2
+            content=$(git show 'refs/rollback-check/current^{commit}:action.yml' 2>/dev/null) || return 2
+            [[ "$content" == *"$2"* ]] && return 0
+            return 1
+          }
 
           # 0. Point of no return. A published release is immutable and its tag name can never be reused, so
           #    nothing is rolled back unless the release is confirmed absent (or still a draft).
@@ -404,53 +436,61 @@ jobs:
             fi
           fi
 
-          # 5. The GHCR version this run pushed. Deleted only when all three hold:
-          #    (a) this run recorded the digest it pushed (never an image it did not build);
-          #    (b) no git reference consumers resolve (vX, vX.Y.Z, main) still pins that image, verified live
-          #        right now rather than inferred from the steps above;
-          #    (c) the version carries only tags created by this run (never a pre-existing vX/latest).
+          # 5. The GHCR version this run pushed. Deleted only when all of these hold:
+          #    (a) it carries NEW_TAG, which preflight verified no image carried before this run, and its id is
+          #        above the high-water mark preflight recorded, i.e. it was created after preflight;
+          #    (b) its digest is the one the build pushed; if the build step was cancelled or failed after
+          #        pushing but before reporting its outputs, the digest is recovered from the NEW_TAG lookup;
+          #    (c) none of the git references consumers resolve (vX, vX.Y.Z, main) pins that digest in its
+          #        action.yml, resolved through tag objects and checked live; any uncertainty preserves the image;
+          #    (d) it carries only tags created by this run (never a pre-existing vX/latest).
+          #    Anything tagged NEW_TAG that survives these checks is reported as incomplete cleanup, never as success.
           if [[ -n "${PKG_API:-}" ]] && [[ -n "${NEW_TAG:-}" ]]; then
-            if [[ ! "${BUILD_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              note "This run pushed no image; nothing to delete in GHCR."
-            else
+            DIGEST="${BUILD_DIGEST:-}"
+            if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              if ! DIGEST=$(ghcr_digest_for_tag "${NEW_TAG}"); then
+                fail "Could not determine whether this run pushed a ${NEW_TAG} image; cleanup is incomplete. Check GHCR for a version tagged ${NEW_TAG} and delete it manually."
+                DIGEST=""
+              elif [[ -z "$DIGEST" ]]; then
+                note "No image carries ${NEW_TAG}; this run pushed nothing to GHCR."
+              else
+                note "The build step reported no digest; recovered ${DIGEST} from the ${NEW_TAG} tag, which no image carried before this run."
+              fi
+            fi
+            if [[ -n "$DIGEST" ]]; then
               PRESERVE=0
-              if [[ -n "${RELEASE_COMMIT:-}" ]]; then
-                for REF in "refs/tags/${MAJOR_TAG}" "refs/tags/${NEW_TAG}"; do
-                  if ! LS=$(git ls-remote origin "$REF"); then
-                    fail "Could not verify ${REF}; preserving the ${NEW_TAG} image."
-                    PRESERVE=1
-                  elif [[ "$(printf '%s\n' "$LS" | awk 'NR==1 {print $1}')" == "$RELEASE_COMMIT" ]]; then
-                    fail "${REF} still points at ${RELEASE_COMMIT}, which pins the ${NEW_TAG} image; preserving it."
-                    PRESERVE=1
-                  fi
-                done
-                if ! git fetch -q origin main; then
-                  fail "Could not fetch origin/main; preserving the ${NEW_TAG} image."
+              for REF in "refs/tags/${MAJOR_TAG}" "refs/tags/${NEW_TAG}" refs/heads/main; do
+                ref_pins_digest "$REF" "$DIGEST"; RC=$?
+                if [[ "$RC" == 0 ]]; then
+                  fail "${REF} pins the ${NEW_TAG} image (${DIGEST}); preserving it."
                   PRESERVE=1
-                elif ! MAIN_ACTION=$(git show origin/main:action.yml 2>/dev/null); then
-                  fail "Could not read action.yml at origin/main; preserving the ${NEW_TAG} image."
-                  PRESERVE=1
-                elif [[ "$MAIN_ACTION" == *"${BUILD_DIGEST}"* ]]; then
-                  fail "origin/main still pins the ${NEW_TAG} image; preserving it."
+                elif [[ "$RC" == 2 ]]; then
+                  fail "Could not determine whether ${REF} pins the ${NEW_TAG} image; preserving it."
                   PRESERVE=1
                 fi
-              fi
+              done
               if [[ "$PRESERVE" == 0 ]]; then
                 OWNED="\"${NEW_TAG}\""
                 [[ -z "${PREV_MAJOR_DIGEST:-}" ]] && OWNED="${OWNED},\"${MAJOR_TAG}\""
                 [[ -z "${PREV_LATEST_DIGEST:-}" ]] && OWNED="${OWNED},\"latest\""
                 if ! IDS=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
-                    --jq ".[] | select(.name == \"${BUILD_DIGEST}\") | select(any(.metadata.container.tags[]; . == \"${NEW_TAG}\")) | select(all(.metadata.container.tags[]; IN(${OWNED}))) | .id"); then
-                  fail "Could not list GHCR versions; delete the ${NEW_TAG} image (${BUILD_DIGEST}) manually."
+                    --jq ".[] | select(.id > ${PREFLIGHT_MAX_VERSION_ID:-0}) | select(.name == \"${DIGEST}\") | select(any(.metadata.container.tags[]; . == \"${NEW_TAG}\")) | select(all(.metadata.container.tags[]; IN(${OWNED}))) | .id"); then
+                  fail "Could not list GHCR versions; delete the ${NEW_TAG} image (${DIGEST}) manually."
                 else
-                  [[ -z "$IDS" ]] && note "No GHCR version matches ${BUILD_DIGEST} with only this run's tags; nothing deleted."
                   for ID in $IDS; do
                     if gh api --method DELETE "${PKG_API}/packages/container/${PACKAGE}/versions/${ID}"; then
-                      note "Deleted GHCR version ${ID} (${NEW_TAG}, ${BUILD_DIGEST})"
+                      note "Deleted GHCR version ${ID} (${NEW_TAG}, ${DIGEST})"
                     else
                       fail "Could not delete GHCR version ${ID}; delete it manually"
                     fi
                   done
+                  # Anything still tagged NEW_TAG is an orphan this run could not prove it created: report it.
+                  if ! LEFT=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                      --jq ".[] | select(any(.metadata.container.tags[]; . == \"${NEW_TAG}\")) | \"\(.id) \(.name)\""); then
+                    fail "Could not confirm that no version tagged ${NEW_TAG} remains; check GHCR manually."
+                  elif [[ -n "$LEFT" ]]; then
+                    fail "A GHCR version tagged ${NEW_TAG} remains that this run cannot prove it created (${LEFT}); delete it manually if it is an orphan."
+                  fi
                 fi
               fi
             fi
