@@ -24,6 +24,14 @@ fail() {
   FAILED=1
 }
 
+# snapshot DIR: a deterministic listing of every path under DIR, git-ignored
+# ones included, with a checksum for every file. Two snapshots differ when a
+# path was added, removed, or had its content changed.
+snapshot() {
+  find "$1" | LC_ALL=C sort
+  find "$1" -type f -exec cksum {} + | LC_ALL=C sort
+}
+
 # run_case NAME WORKSPACE CHANGED_FILES FORCE_TRIGGERS EXCLUDED_MEMBERS EXPECTED_GITHUB_OUTPUT [docker run args...]
 run_case() {
   local name="$1" workspace="$2" changed="$3" force="$4" excluded="$5" expected="$6"
@@ -90,6 +98,8 @@ make_git_dependency_fixture() {
   printf '[net]\ngit-fetch-with-cli = true\n' > "${GITWS}/.cargo/config.toml"
 }
 
+fixture_before="$(snapshot "${FIXTURE}")"
+
 run_case "leaf library change" "${FIXTURE}" \
   "lib-utils/src/lib.rs" "" "" \
 'changed_crates=["lib-utils"]
@@ -118,14 +128,6 @@ affected_library_members=[]
 affected_binary_members=[]
 force_all=false'
 
-# The container runs as root inside the mounted checkout. It must leave the
-# fixture workspace untouched: no Cargo.lock rewrite and no stray files.
-dirty="$(git -C "${REPO_ROOT}" status --porcelain -- tests/fixtures/workspace)"
-if [[ -n "${dirty}" ]]; then
-  echo "${dirty}" >&2
-  fail "the container modified the fixture workspace (git status above)"
-fi
-
 # The dependency repository is owned by the host user while the container runs
 # as root, and git refuses to serve a repository owned by someone else unless it
 # is marked safe. Consumers fetch remote repositories, so this is a test-only
@@ -140,6 +142,15 @@ force_all=false' \
   -v "${GITDEP}:/github/gitdep:ro" \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*'
 rm -rf "${GITDEP}" "${GITWS}" || echo "warning: could not remove ${GITDEP} ${GITWS}" >&2
+
+# The container runs as root inside the mounted checkout. It must leave the
+# fixture workspace exactly as it found it: no Cargo.lock rewrite and no stray
+# files, including under git-ignored paths such as target/.
+fixture_after="$(snapshot "${FIXTURE}")"
+if [[ "${fixture_before}" != "${fixture_after}" ]]; then
+  diff -u <(printf '%s\n' "${fixture_before}") <(printf '%s\n' "${fixture_after}") >&2 || true
+  fail "the container modified the fixture workspace (snapshot diff above)"
+fi
 
 if [[ "${FAILED}" -ne 0 ]]; then
   echo "smoke test FAILED" >&2
