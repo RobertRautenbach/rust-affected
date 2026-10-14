@@ -1,0 +1,11 @@
+[package]
+name = "root-app"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["sub-lib", "independent-lib"]
+resolver = "2"
+
+[dependencies]
+sub-lib = { path = "sub-lib" }

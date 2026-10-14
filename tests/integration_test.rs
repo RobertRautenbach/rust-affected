@@ -11,7 +11,7 @@ fn fixture_graph() -> &'static PackageGraph {
             .iter()
             .collect();
         let mut cmd = MetadataCommand::new();
-        cmd.current_dir(&fixture_dir);
+        cmd.current_dir(&fixture_dir).other_options(["--locked"]);
         PackageGraph::from_command(&mut cmd).expect("Failed to load fixture package graph")
     })
 }
