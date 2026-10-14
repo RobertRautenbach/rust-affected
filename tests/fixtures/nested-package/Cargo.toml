@@ -1,0 +1,3 @@
+[workspace]
+members = ["parent", "parent/nested", "parent/independent"]
+resolver = "2"

@@ -1,64 +1,109 @@
 use globset::{Glob, GlobSetBuilder};
 use guppy::graph::PackageGraph;
 use std::collections::HashSet;
-use std::path::Path;
+use std::fmt;
+use std::path::{Component, Path, PathBuf};
 
+/// A failure while validating triggers or querying the dependency graph.
+#[derive(Debug)]
+pub enum Error {
+    InvalidForceTrigger(globset::Error),
+    Graph(guppy::Error),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidForceTrigger(error) => {
+                write!(f, "invalid force_triggers pattern: {error}")
+            }
+            Self::Graph(error) => write!(f, "failed to query package graph: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::InvalidForceTrigger(error) => error,
+            Self::Graph(error) => error,
+        })
+    }
+}
+
+/// Non-fatal input problems, sorted and deduplicated in the result.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Warning {
+    UnusablePath(String),
+    UnmatchedExclusion(String),
+}
+
+/// Sorted workspace-member names and diagnostics from affected-file analysis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AffectedResult {
+    pub warnings: Vec<Warning>,
     pub force_all: bool,
     pub changed_crates: Vec<String>,
     pub affected_library_members: Vec<String>,
     pub affected_binary_members: Vec<String>,
 }
 
-/// Check whether a package should be excluded from results.
-///
-/// Entries that contain a `/` are treated as **path prefixes** and matched against
-/// the package's directory path relative to the workspace root.
-///   - `tools/` matches every crate whose relative directory starts with `tools/`
-///     (e.g. `tools/resource-clone`).
-///   - `tools/resource-clone` matches that exact relative directory.
-///
-/// Entries without a `/` are compared against the **crate name** directly
-/// (e.g. `resource-clone` excludes a crate named `resource-clone` regardless of
-/// where it lives in the workspace).
-fn is_excluded(pkg_name: &str, pkg_relative_dir: &Path, excluded: &HashSet<String>) -> bool {
-    for entry in excluded {
-        if entry.contains('/') {
-            // Path-based exclusion
-            let prefix = entry.strip_suffix('/').unwrap_or(entry.as_str());
-            let dir_str = pkg_relative_dir.to_str().unwrap_or("");
-            if dir_str == prefix || dir_str.starts_with(&format!("{prefix}/")) {
-                return true;
-            }
-        } else if pkg_name == entry {
-            return true;
+// Lexical normalization preserves deleted paths and does not resolve symlinks.
+fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    false
+    (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
-pub fn check_force_triggers(changed_files: &[String], force_triggers: &[String]) -> bool {
+fn normalize_changed_file(file: &str, root: &Path) -> Option<PathBuf> {
+    let path = Path::new(file);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(root).ok()?
+    } else {
+        path
+    };
+    normalize_relative_path(relative)
+}
+
+fn exclusion_matches(entry: &str, name: &str, directory: &Path) -> bool {
+    // Classify before normalization: "./foo" is a directory, not a crate name.
+    if entry.contains('/') {
+        normalize_relative_path(Path::new(entry))
+            .is_some_and(|prefix| directory.starts_with(prefix))
+    } else {
+        entry == name
+    }
+}
+
+/// Match normalized workspace-relative paths against force-trigger globs.
+///
+/// Returns an error for invalid patterns, even when there are no files.
+pub fn check_force_triggers(
+    changed_files: &[String],
+    force_triggers: &[String],
+) -> Result<bool, Error> {
     if force_triggers.is_empty() {
-        return false;
+        return Ok(false);
     }
 
     let mut builder = GlobSetBuilder::new();
     for trigger in force_triggers {
+        let trigger = trigger.trim_start_matches("./");
         let pattern = if trigger.ends_with('/') {
             format!("{}**", trigger)
         } else {
-            trigger.clone()
+            trigger.to_string()
         };
-        builder.add(
-            Glob::new(&pattern)
-                .unwrap_or_else(|e| panic!("Invalid force_trigger glob pattern {pattern:?}: {e}")),
-        );
+        builder.add(Glob::new(&pattern).map_err(Error::InvalidForceTrigger)?);
     }
-    let globset = builder
-        .build()
-        .expect("Failed to build force_triggers glob set");
-    changed_files.iter().any(|f| globset.is_match(f))
+    let globset = builder.build().map_err(Error::InvalidForceTrigger)?;
+    Ok(changed_files.iter().any(|f| globset.is_match(f)))
 }
 
 /// Compute which workspace crates are affected by a set of changed files.
@@ -75,47 +120,63 @@ pub fn check_force_triggers(changed_files: &[String], force_triggers: &[String])
 /// Exclusion entries that contain `/` are matched as path prefixes against each
 /// package's directory relative to the workspace root (e.g. `tools/` excludes
 /// every crate under `tools/`). Entries without `/` are matched against the crate
-/// name directly.
+/// name directly. A prefix includes nested members. Each accepted path is owned
+/// by its deepest matching member, before exclusions are applied.
+///
+/// Paths are normalized lexically, so deleted files work. Unusable paths are
+/// warned about and ignored, including for force triggers.
+///
+/// # Errors
+/// Returns an error for invalid force-trigger patterns or failed graph queries.
 pub fn compute_affected(
     graph: &PackageGraph,
     changed_files: &[String],
     force_triggers: &[String],
     excluded: &HashSet<String>,
-) -> AffectedResult {
-    if changed_files.is_empty() {
-        return AffectedResult {
-            force_all: false,
-            changed_crates: vec![],
-            affected_library_members: vec![],
-            affected_binary_members: vec![],
-        };
+) -> Result<AffectedResult, Error> {
+    let workspace = graph.workspace();
+    let mut warnings = Vec::new();
+    let files: Vec<PathBuf> = changed_files
+        .iter()
+        .filter_map(|file| {
+            let normalized = normalize_changed_file(file, workspace.root().as_std_path());
+            if normalized.is_none() {
+                warnings.push(Warning::UnusablePath(file.clone()));
+            }
+            normalized
+        })
+        .collect();
+    // Input strings and workspace paths are UTF-8; normalization only removes components.
+    let normalized_files: Vec<String> = files
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let force_all = check_force_triggers(&normalized_files, force_triggers)?;
+    let members: Vec<_> = workspace.iter_by_path().collect();
+    let mut excluded_ids = HashSet::new();
+    for entry in excluded {
+        let mut matched = false;
+        for (dir, pkg) in &members {
+            if exclusion_matches(entry, pkg.name(), dir.as_std_path()) {
+                matched = true;
+                excluded_ids.insert(pkg.id().clone());
+            }
+        }
+        if !matched {
+            warnings.push(Warning::UnmatchedExclusion(entry.clone()));
+        }
     }
+    warnings.sort();
+    warnings.dedup();
 
-    let force_all = check_force_triggers(changed_files, force_triggers);
-
-    let workspace_root = graph.workspace().root().as_std_path();
-
-    // Helper: compute the relative directory for a package.
-    let relative_dir = |pkg: &guppy::graph::PackageMetadata| -> std::path::PathBuf {
-        let dir = pkg
-            .manifest_path()
-            .parent()
-            .expect("manifest has no parent")
-            .as_std_path();
-        dir.strip_prefix(workspace_root)
-            .unwrap_or(dir)
-            .to_path_buf()
-    };
-
-    let mut direct_ids = Vec::new();
-    for pkg in graph.workspace().iter() {
-        let pkg_dir = relative_dir(&pkg);
-
-        if changed_files
+    let mut direct_ids = HashSet::new();
+    for file in &files {
+        if let Some((_, pkg)) = members
             .iter()
-            .any(|f| Path::new(f).starts_with(&pkg_dir))
+            .filter(|(dir, _)| file.starts_with(dir.as_std_path()))
+            .max_by_key(|(dir, _)| dir.components().count())
         {
-            direct_ids.push(pkg.id().clone());
+            direct_ids.insert(pkg.id().clone());
         }
     }
 
@@ -124,19 +185,17 @@ pub fn compute_affected(
     } else {
         graph
             .query_reverse(direct_ids.iter())
-            .expect("reverse query failed")
+            .map_err(Error::Graph)?
             .resolve()
     };
 
-    let workspace = graph.workspace();
-
     let mut changed_crates: Vec<String> = direct_ids
         .iter()
-        .filter_map(|id| graph.metadata(id).ok())
-        .filter(|pkg| {
-            workspace.contains_name(pkg.name())
-                && !is_excluded(pkg.name(), &relative_dir(pkg), excluded)
-        })
+        .map(|id| graph.metadata(id))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Error::Graph)?
+        .into_iter()
+        .filter(|pkg| workspace.contains_name(pkg.name()) && !excluded_ids.contains(pkg.id()))
         .map(|pkg| pkg.name().to_string())
         .collect();
     changed_crates.sort();
@@ -145,7 +204,7 @@ pub fn compute_affected(
         .packages(guppy::graph::DependencyDirection::Forward)
         .filter(|pkg| {
             workspace.contains_name(pkg.name())
-                && !is_excluded(pkg.name(), &relative_dir(pkg), excluded)
+                && !excluded_ids.contains(pkg.id())
                 && !pkg
                     .build_targets()
                     .any(|t| matches!(t.id(), guppy::graph::BuildTargetId::Binary(_)))
@@ -158,7 +217,7 @@ pub fn compute_affected(
         .packages(guppy::graph::DependencyDirection::Forward)
         .filter(|pkg| {
             workspace.contains_name(pkg.name())
-                && !is_excluded(pkg.name(), &relative_dir(pkg), excluded)
+                && !excluded_ids.contains(pkg.id())
                 && pkg
                     .build_targets()
                     .any(|t| matches!(t.id(), guppy::graph::BuildTargetId::Binary(_)))
@@ -167,10 +226,11 @@ pub fn compute_affected(
         .collect();
     affected_binary_members.sort();
 
-    AffectedResult {
+    Ok(AffectedResult {
+        warnings,
         force_all,
         changed_crates,
         affected_library_members,
         affected_binary_members,
-    }
+    })
 }

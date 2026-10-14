@@ -1,5 +1,14 @@
 use guppy::{MetadataCommand, graph::PackageGraph};
-use rust_affected::{AffectedResult, compute_affected};
+use rust_affected::AffectedResult;
+
+fn compute_affected(
+    graph: &PackageGraph,
+    files: &[String],
+    triggers: &[String],
+    excluded: &HashSet<String>,
+) -> AffectedResult {
+    rust_affected::compute_affected(graph, files, triggers, excluded).unwrap()
+}
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -11,7 +20,7 @@ fn fixture_graph() -> &'static PackageGraph {
             .iter()
             .collect();
         let mut cmd = MetadataCommand::new();
-        cmd.current_dir(&fixture_dir);
+        cmd.current_dir(&fixture_dir).other_options(["--locked"]);
         PackageGraph::from_command(&mut cmd).expect("Failed to load fixture package graph")
     })
 }
@@ -37,6 +46,7 @@ fn empty_changed_files_produces_empty_result() {
     assert_eq!(
         result,
         AffectedResult {
+            warnings: vec![],
             force_all: false,
             changed_crates: vec![],
             affected_library_members: vec![],
