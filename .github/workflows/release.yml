@@ -269,6 +269,8 @@ jobs:
       - name: Move git major tag
         run: |
           set -euo pipefail
+          # Recorded before the push: even a push whose outcome is unknown may have exposed the release commit.
+          echo "MAJOR_TAG_MOVE_ATTEMPTED=true" >> "$GITHUB_ENV"
           # The lease requires the tag to still point at its recorded previous target (or not to exist yet).
           git push --force-with-lease="refs/tags/${MAJOR_TAG}:${PREV_MAJOR_SHA}" origin "${RELEASE_COMMIT}:refs/tags/${MAJOR_TAG}"
           NOW=$(git ls-remote origin "refs/tags/${MAJOR_TAG}" | awk 'NR==1 {print $1}')
@@ -358,6 +360,29 @@ jobs:
             fi
           fi
 
+          # Exposure. Once the release commit has been reachable through any public ref (the version tag, main, or
+          # the major tag), a consumer may already hold its action.yml and pull the pinned image later. In that
+          # case the mutable aliases are restored but the version tag and its image are retained, and the next
+          # release advances the version. Only a release that nobody could have seen is cleaned up completely.
+          # Any failure to determine exposure counts as exposed.
+          EXPOSED=0
+          if [[ -n "${RELEASE_COMMIT:-}" ]]; then
+            [[ "${MAJOR_TAG_MOVE_ATTEMPTED:-}" == true ]] && EXPOSED=1
+            if ! found=$(git ls-remote origin "refs/tags/${NEW_TAG}"); then
+              fail "Could not query origin for ${NEW_TAG}; treating the release commit as exposed."
+              EXPOSED=1
+            elif [[ -n "$found" ]]; then
+              EXPOSED=1
+            fi
+            if ! git fetch -q origin main; then
+              fail "Could not fetch origin/main; treating the release commit as exposed."
+              EXPOSED=1
+            elif git merge-base --is-ancestor "${RELEASE_COMMIT}" origin/main; then
+              EXPOSED=1
+            fi
+            [[ "$EXPOSED" == 1 ]] && note "The release commit ${RELEASE_COMMIT} was exposed through a public ref: tag ${NEW_TAG} and its image are retained; the next release will use the following version."
+          fi
+
           # 1. Git major tag: restore the previous target if this run moved it (lease: only if it still points at our commit).
           if [[ -n "${RELEASE_COMMIT:-}" ]]; then
             if ! LS=$(git ls-remote origin "refs/tags/${MAJOR_TAG}"); then
@@ -405,9 +430,9 @@ jobs:
             restore_image_tag latest "${PREV_LATEST_DIGEST:-}"
           fi
 
-          # 3. Version tag: it is only ever pushed together with the release commit, so delete it only if this run
-          #    pushed it and it still points at that commit (lease).
-          if [[ -n "${RELEASE_COMMIT:-}" ]]; then
+          # 3. Version tag: retained once exposed (see above). Otherwise it is only ever pushed together with the
+          #    release commit, so delete it only if this run pushed it and it still points at that commit (lease).
+          if [[ -n "${RELEASE_COMMIT:-}" ]] && [[ "$EXPOSED" == 0 ]]; then
             if ! LS=$(git ls-remote origin "refs/tags/${NEW_TAG}"); then
               fail "Could not query origin for ${NEW_TAG}; not touching it."
             else
@@ -448,7 +473,8 @@ jobs:
           #        action.yml, resolved through tag objects and checked live; any uncertainty preserves the image;
           #    (d) it carries only tags created by this run (never a pre-existing vX/latest).
           #    Anything tagged NEW_TAG that survives these checks is reported as incomplete cleanup, never as success.
-          if [[ -n "${PKG_API:-}" ]] && [[ -n "${NEW_TAG:-}" ]]; then
+          #    Skipped entirely once the release commit was exposed: the image stays for consumers who hold its pin.
+          if [[ -n "${PKG_API:-}" ]] && [[ -n "${NEW_TAG:-}" ]] && [[ "$EXPOSED" == 0 ]]; then
             DIGEST="${BUILD_DIGEST:-}"
             if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               if ! DIGEST=$(ghcr_digest_for_tag "${NEW_TAG}"); then
@@ -501,6 +527,10 @@ jobs:
           fi
 
           if [[ "$FAILED" == 0 ]]; then
-            note "Rollback complete: main, ${MAJOR_TAG:-the major tag} and the ${MAJOR_TAG:-major}/latest images are as they were before this run."
+            if [[ "$EXPOSED" == 1 ]]; then
+              note "Rollback complete: main, ${MAJOR_TAG} and the ${MAJOR_TAG}/latest images are as they were before this run; ${NEW_TAG} and its image are retained."
+            else
+              note "Rollback complete: main, ${MAJOR_TAG:-the major tag} and the ${MAJOR_TAG:-major}/latest images are as they were before this run."
+            fi
           fi
           exit "$FAILED"
