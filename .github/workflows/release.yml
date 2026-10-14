@@ -9,14 +9,17 @@ on:
         type: choice
         options: [patch, minor, major]
 
-permissions:
-  contents: write
-  packages: write
+# Permissions are declared per job. Only one release may run at a time.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   test:
     name: Run tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -24,44 +27,155 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
-  build-and-push:
-    name: Build & Push Docker image
+  # Step order: everything reversible first, consumer-visible mutations
+  # (git vX tag, GHCR vX/latest tags) as late as possible, and the one
+  # irreversible mutation (publishing the immutable GitHub release) last.
+  #
+  # Every lookup that the rollback relies on distinguishes "confirmed absent"
+  # from "lookup failed": a failed lookup aborts before anything is mutated,
+  # and during rollback it is reported rather than treated as absence.
+  release:
+    name: Build, push & release
     needs: test
-    runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PACKAGE: rust-affected
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute version and names
+        env:
+          BUMP: ${{ inputs.bump }}
+          OWNER_RAW: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          LAST_TAG=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)
+          : "${LAST_TAG:=v0.0.0}"
+          IFS=. read -r MAJOR MINOR PATCH <<< "${LAST_TAG#v}"
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+            *) echo "::error::Unknown bump type '${BUMP}'"; exit 1 ;;
+          esac
+          OWNER=$(printf '%s' "$OWNER_RAW" | tr '[:upper:]' '[:lower:]')
+          {
+            echo "LAST_TAG=${LAST_TAG}"
+            echo "NEW_TAG=v${MAJOR}.${MINOR}.${PATCH}"
+            echo "MAJOR_TAG=v${MAJOR}"
+            echo "OWNER=${OWNER}"
+            echo "IMAGE=ghcr.io/${OWNER}/${PACKAGE}"
+          } >> "$GITHUB_ENV"
+          echo "Last tag: ${LAST_TAG}; new tag: v${MAJOR}.${MINOR}.${PATCH}; major tag: v${MAJOR}"
 
       - name: Check for relevant changes since last release
         run: |
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [[ -z "$LAST_TAG" ]]; then
-            echo "No previous release tag found – proceeding."
-          else
-            DIFF=$(git diff --name-only "$LAST_TAG" HEAD -- src/ Dockerfile action.yml Cargo.toml Cargo.lock)
-            if [[ -z "$DIFF" ]]; then
-              echo "::error::No changes to action-relevant files (src/, Dockerfile, action.yml, Cargo.toml, Cargo.lock) since $LAST_TAG. Aborting release."
-              exit 1
-            fi
-            echo "Changed files since $LAST_TAG:"
-            echo "$DIFF"
+          set -euo pipefail
+          if [[ "$LAST_TAG" == "v0.0.0" ]]; then
+            echo "No previous release tag found; proceeding."
+            exit 0
           fi
+          DIFF=$(git diff --name-only "$LAST_TAG" HEAD -- src/ Dockerfile action.yml Cargo.toml Cargo.lock)
+          if [[ -z "$DIFF" ]]; then
+            echo "::error::No changes to action-relevant files (src/, Dockerfile, action.yml, Cargo.toml, Cargo.lock) since ${LAST_TAG}. Aborting release."
+            exit 1
+          fi
+          printf 'Changed files since %s:\n%s\n' "$LAST_TAG" "$DIFF"
 
-      - name: Compute next version
-        id: version
-        uses: lajosbencz/actions-manual-bump@3d4f105e5aae2cf18ebcdea63e9b0b773ea10822 # v1.0.0
-        with:
-          release_type: ${{ inputs.bump }}
-          push: "false"
-          prefix_with_v: "true"
-
-      - name: Set lowercase owner
+      - name: Preflight checks and record previous targets
         run: |
-          echo "OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-          MAJOR_TAG="v$(echo '${{ steps.version.outputs.new_tag }}' | cut -d. -f1 | tr -d v)"
-          echo "MAJOR_TAG=$MAJOR_TAG" >> $GITHUB_ENV
+          set -euo pipefail
+          # Prints "published", "draft" or "absent" for ${NEW_TAG}; returns 1 if the lookup itself failed.
+          release_state() {
+            local drafts
+            drafts=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${NEW_TAG}\") | .draft") || return 1
+            case "$drafts" in
+              "")      echo absent ;;
+              *false*) echo published ;;
+              *)       echo draft ;;
+            esac
+          }
+          # Prints the digest of the GHCR package version carrying tag $1 (empty if none); returns 1 if the lookup failed.
+          ghcr_digest_for_tag() {
+            local out err
+            err=$(mktemp)
+            if ! out=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                --jq ".[] | select(any(.metadata.container.tags[]; . == \"$1\")) | .name" 2>"$err"); then
+              if grep -q 'HTTP 404' "$err"; then
+                out=""   # the package does not exist yet: confirmed absence
+              else
+                cat "$err" >&2; rm -f "$err"; return 1
+              fi
+            fi
+            rm -f "$err"
+            [[ -z "$out" || "$out" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+            printf '%s' "$out"
+          }
+          # Prints the highest GHCR package version id that exists right now (0 if the package does not exist);
+          # returns 1 if the lookup failed. Rollback uses it as proof that a version was created by this run.
+          ghcr_max_version_id() {
+            local out err
+            err=$(mktemp)
+            if ! out=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                --jq '[.[].id] | max // 0' 2>"$err"); then
+              if grep -q 'HTTP 404' "$err"; then
+                out="0"
+              else
+                cat "$err" >&2; rm -f "$err"; return 1
+              fi
+            fi
+            rm -f "$err"
+            out=$(printf '%s\n' "$out" | sort -n | tail -n1)
+            [[ "$out" =~ ^[0-9]+$ ]] || return 1
+            printf '%s' "$out"
+          }
+
+          EXISTING=$(git ls-remote origin "refs/tags/${NEW_TAG}")
+          if [[ -n "$EXISTING" ]]; then
+            echo "::error::Tag ${NEW_TAG} already exists on origin."
+            exit 1
+          fi
+          STATE=$(release_state) || { echo "::error::Could not determine whether a release named ${NEW_TAG} exists."; exit 1; }
+          if [[ "$STATE" != "absent" ]]; then
+            echo "::error::A release named ${NEW_TAG} already exists (${STATE}). Immutable releases: tag names cannot be reused."
+            exit 1
+          fi
+          case "$(gh api "users/${OWNER}" --jq .type)" in
+            User)         PKG_API="users/${OWNER}" ;;
+            Organization) PKG_API="orgs/${OWNER}" ;;
+            *) echo "::error::Cannot determine owner type for ${OWNER}."; exit 1 ;;
+          esac
+          EXISTING_IMAGE=$(ghcr_digest_for_tag "${NEW_TAG}") \
+            || { echo "::error::Could not check whether GHCR already has an image tagged ${NEW_TAG}."; exit 1; }
+          if [[ -n "$EXISTING_IMAGE" ]]; then
+            echo "::error::GHCR already has an image tagged ${NEW_TAG} (${EXISTING_IMAGE}) that this run did not build. Delete that package version before releasing ${NEW_TAG}."
+            exit 1
+          fi
+          PREV_MAJOR_SHA=$(git ls-remote origin "refs/tags/${MAJOR_TAG}" | awk 'NR==1 {print $1}')
+          PREV_MAJOR_DIGEST=$(ghcr_digest_for_tag "${MAJOR_TAG}") \
+            || { echo "::error::Could not look up which image currently carries the ${MAJOR_TAG} tag in GHCR."; exit 1; }
+          PREV_LATEST_DIGEST=$(ghcr_digest_for_tag latest) \
+            || { echo "::error::Could not look up which image currently carries the latest tag in GHCR."; exit 1; }
+          PREFLIGHT_MAX_VERSION_ID=$(ghcr_max_version_id) \
+            || { echo "::error::Could not list the existing GHCR package versions."; exit 1; }
+          {
+            echo "PKG_API=${PKG_API}"
+            echo "PREV_MAJOR_SHA=${PREV_MAJOR_SHA}"
+            echo "PREV_MAJOR_DIGEST=${PREV_MAJOR_DIGEST}"
+            echo "PREV_LATEST_DIGEST=${PREV_LATEST_DIGEST}"
+            echo "PREFLIGHT_MAX_VERSION_ID=${PREFLIGHT_MAX_VERSION_ID}"
+          } >> "$GITHUB_ENV"
+          echo "Previous ${MAJOR_TAG}: commit ${PREV_MAJOR_SHA:-<none>}, image ${PREV_MAJOR_DIGEST:-<none>}; previous latest image: ${PREV_LATEST_DIGEST:-<none>}"
 
       - name: Login to GHCR
         uses: docker/login-action@v4
@@ -76,7 +190,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build and push
+      - name: Build and push image (version tag only)
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -84,82 +199,343 @@ jobs:
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          tags: |
-            ghcr.io/${{ env.OWNER }}/rust-affected:latest
-            ghcr.io/${{ env.OWNER }}/rust-affected:${{ steps.version.outputs.new_tag }}
-            ghcr.io/${{ env.OWNER }}/rust-affected:${{ env.MAJOR_TAG }}
+          tags: ${{ env.IMAGE }}:${{ env.NEW_TAG }}
 
-      - name: Push git tags
-        run: |
-          MAJOR_TAG="v$(echo '${{ steps.version.outputs.new_tag }}' | cut -d. -f1 | tr -d v)"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag ${{ steps.version.outputs.new_tag }}
-          git tag -f $MAJOR_TAG
-          git push origin ${{ steps.version.outputs.new_tag }}
-          git push origin $MAJOR_TAG --force
-
-      - name: Update version references
-        run: |
-          NEW_TAG="${{ steps.version.outputs.new_tag }}"
-          # Update @ref in README and :tag in action.yml
-          sed -i "s|robertrautenbach/rust-affected@[^ '\"]*|robertrautenbach/rust-affected@${NEW_TAG}|g" README.md
-          sed -i "s|rust-affected:[^ '\"]*|rust-affected:${NEW_TAG}|g" action.yml
-          git add README.md action.yml
-          git diff --cached --quiet || git commit -m "chore: update version references to ${NEW_TAG}"
-          git push origin HEAD:main
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.version.outputs.new_tag }}
-          name: ${{ steps.version.outputs.new_tag }}
-          generate_release_notes: true
-          make_latest: true
-
-      - name: Rollback on failure
-        if: failure()
+      - name: Verify pushed image digest
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          NEW_TAG="${{ steps.version.outputs.new_tag }}"
-          MAJOR_TAG="${{ env.MAJOR_TAG }}"
-          OWNER="${{ env.OWNER }}"
+          set -euo pipefail
+          if [[ ! "$BUILD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected image digest from build: '${BUILD_DIGEST}'"
+            exit 1
+          fi
+          REGISTRY_DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${NEW_TAG}" --format '{{.Manifest.Digest}}')
+          if [[ "$REGISTRY_DIGEST" != "$BUILD_DIGEST" ]]; then
+            echo "::error::Registry reports ${REGISTRY_DIGEST} for ${IMAGE}:${NEW_TAG} but the build reported ${BUILD_DIGEST}."
+            exit 1
+          fi
+          echo "IMAGE_DIGEST=${BUILD_DIGEST}" >> "$GITHUB_ENV"
+          echo "Pushed ${IMAGE}:${NEW_TAG}@${BUILD_DIGEST}"
 
-          echo "::warning::Release failed — rolling back artifacts"
+      - name: Pin action.yml to the new image, update README, push release commit and version tag
+        run: |
+          set -euo pipefail
+          [[ "$NEW_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Invalid NEW_TAG '${NEW_TAG}'"; exit 1; }
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Invalid IMAGE_DIGEST '${IMAGE_DIGEST}'"; exit 1; }
 
-          # 1. Revert the version-update commit if it was pushed to main
-          git fetch origin main
-          LATEST_MSG=$(git log origin/main -1 --format='%s' 2>/dev/null || true)
-          if echo "$LATEST_MSG" | grep -q "$NEW_TAG"; then
-            echo "Reverting version-update commit on main..."
-            git checkout origin/main
-            git revert HEAD --no-edit
-            git push origin HEAD:main
+          # action.yml: rewrite the single image line, whether it currently ends in ":tag" or ":tag@sha256:...".
+          sed -E -i "s|^(  image: 'docker://ghcr\.io/${OWNER}/${PACKAGE}):[^'@]+(@sha256:[0-9a-f]{64})?'\$|\1:${NEW_TAG}@${IMAGE_DIGEST}'|" action.yml
+          grep -qF "image: 'docker://ghcr.io/${OWNER}/${PACKAGE}:${NEW_TAG}@${IMAGE_DIGEST}'" action.yml \
+            || { echo "::error::action.yml image line was not rewritten."; exit 1; }
+          [[ "$(grep -c '^  image: ' action.yml)" == 1 ]] \
+            || { echo "::error::Expected exactly one image: line in action.yml."; exit 1; }
+
+          # README.md: only full vMAJOR.MINOR.PATCH references are bumped; "@v3" in the migration example is untouched.
+          sed -E -i "s|(${OWNER}/${PACKAGE}@)v[0-9]+\.[0-9]+\.[0-9]+|\1${NEW_TAG}|g" README.md
+          if grep -nE "${OWNER}/${PACKAGE}@v[0-9]+\.[0-9]+\.[0-9]+" README.md | grep -vF "@${NEW_TAG}"; then
+            echo "::error::README.md still contains stale full-version references."
+            exit 1
           fi
 
-          # 2. Delete git tags if they were pushed
-          echo "Deleting git tag ${NEW_TAG} (if exists)..."
-          git push origin ":refs/tags/${NEW_TAG}" 2>/dev/null || true
-          echo "Deleting git tag ${MAJOR_TAG} (if exists)..."
-          git push origin ":refs/tags/${MAJOR_TAG}" 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md action.yml
+          if git diff --cached --quiet; then
+            echo "::error::Version-reference rewrite produced no changes; refusing to tag an unchanged commit."
+            exit 1
+          fi
+          git commit -m "chore: update version references to ${NEW_TAG}"
+          RELEASE_COMMIT=$(git rev-parse HEAD)
+          echo "RELEASE_COMMIT=${RELEASE_COMMIT}" >> "$GITHUB_ENV"
+          git tag "${NEW_TAG}" "${RELEASE_COMMIT}"
+          # Atomic: main and the version tag land together or not at all.
+          git push --atomic origin "HEAD:refs/heads/main" "refs/tags/${NEW_TAG}"
+          echo "Pushed ${RELEASE_COMMIT} to main with tag ${NEW_TAG}"
 
-          # 3. Best-effort delete Docker image tags from GHCR
-          for TAG_TO_DELETE in "$NEW_TAG" "$MAJOR_TAG" ; do
-            echo "Deleting Docker tag ${TAG_TO_DELETE} (if exists)..."
-            # Try user endpoint first, then org endpoint
-            for API_PREFIX in "users/${OWNER}" "orgs/${OWNER}" ; do
-              VERSION_ID=$(gh api \
-                "${API_PREFIX}/packages/container/rust-affected/versions" \
-                --jq ".[] | select(.metadata.container.tags[] == \"${TAG_TO_DELETE}\") | .id" \
-                2>/dev/null || true)
-              if [ -n "$VERSION_ID" ]; then
-                gh api --method DELETE \
-                  "${API_PREFIX}/packages/container/rust-affected/versions/${VERSION_ID}" \
-                  2>/dev/null || true
-                break
-              fi
-            done
+      - name: Promote image tags (manifest-only retag)
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${IMAGE}:${MAJOR_TAG}" --tag "${IMAGE}:latest" "${IMAGE}@${IMAGE_DIGEST}"
+          for TAG in "${MAJOR_TAG}" latest; do
+            GOT=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')
+            if [[ "$GOT" != "$IMAGE_DIGEST" ]]; then
+              echo "::error::${IMAGE}:${TAG} resolves to ${GOT}, expected ${IMAGE_DIGEST}."
+              exit 1
+            fi
           done
+          echo "Promoted ${IMAGE_DIGEST} to ${MAJOR_TAG} and latest"
 
-          echo "::error::Rollback complete. Review the state before retrying."
+      - name: Move git major tag
+        run: |
+          set -euo pipefail
+          # Recorded before the push: even a push whose outcome is unknown may have exposed the release commit.
+          echo "MAJOR_TAG_MOVE_ATTEMPTED=true" >> "$GITHUB_ENV"
+          # The lease requires the tag to still point at its recorded previous target (or not to exist yet).
+          git push --force-with-lease="refs/tags/${MAJOR_TAG}:${PREV_MAJOR_SHA}" origin "${RELEASE_COMMIT}:refs/tags/${MAJOR_TAG}"
+          NOW=$(git ls-remote origin "refs/tags/${MAJOR_TAG}" | awk 'NR==1 {print $1}')
+          if [[ "$NOW" != "$RELEASE_COMMIT" ]]; then
+            echo "::error::${MAJOR_TAG} points at ${NOW}, expected ${RELEASE_COMMIT}."
+            exit 1
+          fi
+          echo "Moved ${MAJOR_TAG} to ${RELEASE_COMMIT}"
+
+      - name: Publish GitHub release (point of no return)
+        run: |
+          set -euo pipefail
+          gh release create "${NEW_TAG}" --title "${NEW_TAG}" --verify-tag --generate-notes --latest
+
+      - name: Write job summary
+        run: |
+          {
+            echo "## Released ${NEW_TAG}"
+            echo ""
+            echo "- Commit: \`${RELEASE_COMMIT}\` (tags \`${NEW_TAG}\`, \`${MAJOR_TAG}\`)"
+            echo "- Image: \`${IMAGE}:${NEW_TAG}@${IMAGE_DIGEST}\` (also tagged \`${MAJOR_TAG}\`, \`latest\`)"
+            echo "- Previous ${MAJOR_TAG}: commit \`${PREV_MAJOR_SHA:-none}\`, image \`${PREV_MAJOR_DIGEST:-none}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Roll back (only what this run changed)
+        if: failure() || cancelled()
+        env:
+          # Digest of the image this run pushed (empty if the build never pushed); the only image rollback may delete.
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          # The runner starts bash with -eo pipefail. Rollback must run every item and report, so errexit is
+          # turned off explicitly here; every command's status is handled by hand below.
+          set +e
+          set -uo pipefail
+          FAILED=0
+          note() { echo "::warning::$*"; }
+          fail() { echo "::error::$*"; FAILED=1; }
+          # Prints "published", "draft" or "absent" for ${NEW_TAG}; returns 1 if the lookup itself failed.
+          release_state() {
+            local drafts
+            drafts=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${NEW_TAG}\") | .draft") || return 1
+            case "$drafts" in
+              "")      echo absent ;;
+              *false*) echo published ;;
+              *)       echo draft ;;
+            esac
+          }
+          # Prints the digest of the GHCR package version carrying tag $1 (empty if none); returns 1 if the lookup failed.
+          ghcr_digest_for_tag() {
+            local out err
+            err=$(mktemp)
+            if ! out=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                --jq ".[] | select(any(.metadata.container.tags[]; . == \"$1\")) | .name" 2>"$err"); then
+              if grep -q 'HTTP 404' "$err"; then
+                out=""
+              else
+                cat "$err" >&2; rm -f "$err"; return 1
+              fi
+            fi
+            rm -f "$err"
+            [[ -z "$out" || "$out" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+            printf '%s' "$out"
+          }
+          # Returns 0 if the remote ref $1 resolves (through any tag object) to a commit whose action.yml pins
+          # digest $2, 1 if it does not or the ref does not exist, 2 if that could not be determined.
+          ref_pins_digest() {
+            local found content
+            found=$(git ls-remote origin "$1") || return 2
+            [[ -z "$found" ]] && return 1
+            git fetch -q --no-tags origin "+$1:refs/rollback-check/current" || return 2
+            content=$(git show 'refs/rollback-check/current^{commit}:action.yml' 2>/dev/null) || return 2
+            [[ "$content" == *"$2"* ]] && return 0
+            return 1
+          }
+
+          # 0. Point of no return. A published release is immutable and its tag name can never be reused, so
+          #    nothing is rolled back unless the release is confirmed absent (or still a draft).
+          if [[ -n "${NEW_TAG:-}" ]]; then
+            if ! STATE=$(release_state); then
+              fail "Could not determine whether release ${NEW_TAG} was published. Refusing to roll back with an unknown publication state; check the release manually."
+              exit 1
+            fi
+            if [[ "$STATE" == "published" ]]; then
+              fail "Release ${NEW_TAG} is published and immutable. Not rolling back: the release is complete. Fix forward."
+              exit 1
+            fi
+          fi
+
+          # Exposure. Once the release commit has been reachable through any public ref (the version tag, main, or
+          # the major tag), a consumer may already hold its action.yml and pull the pinned image later. In that
+          # case the mutable aliases are restored but the version tag and its image are retained, and the next
+          # release advances the version. Only a release that nobody could have seen is cleaned up completely.
+          # Any failure to determine exposure counts as exposed.
+          EXPOSED=0
+          if [[ -n "${RELEASE_COMMIT:-}" ]]; then
+            [[ "${MAJOR_TAG_MOVE_ATTEMPTED:-}" == true ]] && EXPOSED=1
+            if ! found=$(git ls-remote origin "refs/tags/${NEW_TAG}"); then
+              fail "Could not query origin for ${NEW_TAG}; treating the release commit as exposed."
+              EXPOSED=1
+            elif [[ -n "$found" ]]; then
+              EXPOSED=1
+            fi
+            if ! git fetch -q origin main; then
+              fail "Could not fetch origin/main; treating the release commit as exposed."
+              EXPOSED=1
+            elif git merge-base --is-ancestor "${RELEASE_COMMIT}" origin/main; then
+              EXPOSED=1
+            fi
+            [[ "$EXPOSED" == 1 ]] && note "The release commit ${RELEASE_COMMIT} was exposed through a public ref: tag ${NEW_TAG} and its image are retained; the next release will use the following version."
+          fi
+
+          # 1. Git major tag: restore the previous target if this run moved it (lease: only if it still points at our commit).
+          if [[ -n "${RELEASE_COMMIT:-}" ]]; then
+            if ! LS=$(git ls-remote origin "refs/tags/${MAJOR_TAG}"); then
+              fail "Could not query origin for ${MAJOR_TAG}; not touching it."
+            else
+              CUR_MAJOR=$(printf '%s\n' "$LS" | awk 'NR==1 {print $1}')
+              if [[ "$CUR_MAJOR" == "$RELEASE_COMMIT" ]]; then
+                if [[ -n "${PREV_MAJOR_SHA:-}" ]]; then
+                  if git push --force-with-lease="refs/tags/${MAJOR_TAG}:${RELEASE_COMMIT}" origin "${PREV_MAJOR_SHA}:refs/tags/${MAJOR_TAG}"; then
+                    note "Restored ${MAJOR_TAG} -> ${PREV_MAJOR_SHA}"
+                  else
+                    fail "Could not restore ${MAJOR_TAG} -> ${PREV_MAJOR_SHA}"
+                  fi
+                else
+                  if git push --force-with-lease="refs/tags/${MAJOR_TAG}:${RELEASE_COMMIT}" origin ":refs/tags/${MAJOR_TAG}"; then
+                    note "Deleted ${MAJOR_TAG} (it did not exist before this run)"
+                  else
+                    fail "Could not delete ${MAJOR_TAG}"
+                  fi
+                fi
+              fi
+            fi
+          fi
+
+          # 2. GHCR major/latest: re-point only those that currently point at the new image.
+          if [[ -n "${IMAGE_DIGEST:-}" ]]; then
+            restore_image_tag() {  # $1 = tag, $2 = previous digest ('' = did not exist before this run)
+              local cur
+              if ! cur=$(ghcr_digest_for_tag "$1"); then
+                fail "Could not look up ${IMAGE}:$1 in GHCR; not touching it. If it points at ${IMAGE_DIGEST}, restore it manually to ${2:-<none>}."
+                return 0
+              fi
+              [[ "$cur" == "$IMAGE_DIGEST" ]] || return 0
+              if [[ -n "$2" ]]; then
+                if docker buildx imagetools create --tag "${IMAGE}:$1" "${IMAGE}@$2"; then
+                  note "Restored ${IMAGE}:$1 -> $2"
+                else
+                  fail "Could not restore ${IMAGE}:$1 -> $2"
+                fi
+              else
+                if [[ "$EXPOSED" == 1 ]]; then
+                  # GHCR cannot delete a single tag, and the image is retained because the release commit was exposed.
+                  fail "${IMAGE}:$1 did not exist before this run and now points at the retained ${NEW_TAG} image (${IMAGE_DIGEST}). It cannot be removed without deleting that image. Recovery: the next successful release re-points it; to remove it sooner, delete the GHCR package version ${IMAGE_DIGEST} once no consumer pins it."
+                else
+                  note "${IMAGE}:$1 did not exist before this run; it is removed together with the new version below"
+                fi
+              fi
+            }
+            restore_image_tag "${MAJOR_TAG}" "${PREV_MAJOR_DIGEST:-}"
+            restore_image_tag latest "${PREV_LATEST_DIGEST:-}"
+          fi
+
+          # 3. Version tag: retained once exposed (see above). Otherwise it is only ever pushed together with the
+          #    release commit, so delete it only if this run pushed it and it still points at that commit (lease).
+          if [[ -n "${RELEASE_COMMIT:-}" ]] && [[ "$EXPOSED" == 0 ]]; then
+            if ! LS=$(git ls-remote origin "refs/tags/${NEW_TAG}"); then
+              fail "Could not query origin for ${NEW_TAG}; not touching it."
+            else
+              CUR_TAG=$(printf '%s\n' "$LS" | awk 'NR==1 {print $1}')
+              if [[ "$CUR_TAG" == "$RELEASE_COMMIT" ]]; then
+                if git push --force-with-lease="refs/tags/${NEW_TAG}:${RELEASE_COMMIT}" origin ":refs/tags/${NEW_TAG}"; then
+                  note "Deleted tag ${NEW_TAG}"
+                else
+                  fail "Could not delete tag ${NEW_TAG}"
+                fi
+              elif [[ -n "$CUR_TAG" ]]; then
+                fail "Tag ${NEW_TAG} points at ${CUR_TAG}, not at this run's ${RELEASE_COMMIT}; leaving it alone."
+              fi
+            fi
+          fi
+
+          # 4. Release commit: revert only if it actually landed on main.
+          if [[ -n "${RELEASE_COMMIT:-}" ]]; then
+            if ! git fetch -q origin main; then
+              fail "Could not fetch origin/main; cannot tell whether ${RELEASE_COMMIT} landed. Check main manually."
+            elif git merge-base --is-ancestor "${RELEASE_COMMIT}" origin/main; then
+              git reset -q --hard && git checkout -q origin/main
+              if git revert --no-edit "${RELEASE_COMMIT}" && git push origin HEAD:refs/heads/main; then
+                note "Reverted ${RELEASE_COMMIT} on main"
+              else
+                git revert --abort 2>/dev/null || true
+                fail "Could not revert ${RELEASE_COMMIT} on main; revert it manually"
+              fi
+            fi
+          fi
+
+          # 5. The GHCR version this run pushed. Deleted only when all of these hold:
+          #    (a) it carries NEW_TAG, which preflight verified no image carried before this run, and its id is
+          #        above the high-water mark preflight recorded, i.e. it was created after preflight;
+          #    (b) its digest is the one the build pushed; if the build step was cancelled or failed after
+          #        pushing but before reporting its outputs, the digest is recovered from the NEW_TAG lookup;
+          #    (c) none of the git references consumers resolve (vX, vX.Y.Z, main) pins that digest in its
+          #        action.yml, resolved through tag objects and checked live; any uncertainty preserves the image;
+          #    (d) it carries only tags created by this run (never a pre-existing vX/latest).
+          #    Anything tagged NEW_TAG that survives these checks is reported as incomplete cleanup, never as success.
+          #    Skipped entirely once the release commit was exposed: the image stays for consumers who hold its pin.
+          if [[ -n "${PKG_API:-}" ]] && [[ -n "${NEW_TAG:-}" ]] && [[ "$EXPOSED" == 0 ]]; then
+            DIGEST="${BUILD_DIGEST:-}"
+            if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              if ! DIGEST=$(ghcr_digest_for_tag "${NEW_TAG}"); then
+                fail "Could not determine whether this run pushed a ${NEW_TAG} image; cleanup is incomplete. Check GHCR for a version tagged ${NEW_TAG} and delete it manually."
+                DIGEST=""
+              elif [[ -z "$DIGEST" ]]; then
+                note "No image carries ${NEW_TAG}; this run pushed nothing to GHCR."
+              else
+                note "The build step reported no digest; recovered ${DIGEST} from the ${NEW_TAG} tag, which no image carried before this run."
+              fi
+            fi
+            if [[ -n "$DIGEST" ]]; then
+              PRESERVE=0
+              for REF in "refs/tags/${MAJOR_TAG}" "refs/tags/${NEW_TAG}" refs/heads/main; do
+                RC=0
+                ref_pins_digest "$REF" "$DIGEST" || RC=$?
+                if [[ "$RC" == 0 ]]; then
+                  fail "${REF} pins the ${NEW_TAG} image (${DIGEST}); preserving it."
+                  PRESERVE=1
+                elif [[ "$RC" == 2 ]]; then
+                  fail "Could not determine whether ${REF} pins the ${NEW_TAG} image; preserving it."
+                  PRESERVE=1
+                fi
+              done
+              if [[ "$PRESERVE" == 0 ]]; then
+                OWNED="\"${NEW_TAG}\""
+                [[ -z "${PREV_MAJOR_DIGEST:-}" ]] && OWNED="${OWNED},\"${MAJOR_TAG}\""
+                [[ -z "${PREV_LATEST_DIGEST:-}" ]] && OWNED="${OWNED},\"latest\""
+                if ! IDS=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                    --jq ".[] | select(.id > ${PREFLIGHT_MAX_VERSION_ID:-0}) | select(.name == \"${DIGEST}\") | select(any(.metadata.container.tags[]; . == \"${NEW_TAG}\")) | select(all(.metadata.container.tags[]; IN(${OWNED}))) | .id"); then
+                  fail "Could not list GHCR versions; delete the ${NEW_TAG} image (${DIGEST}) manually."
+                else
+                  for ID in $IDS; do
+                    if gh api --method DELETE "${PKG_API}/packages/container/${PACKAGE}/versions/${ID}"; then
+                      note "Deleted GHCR version ${ID} (${NEW_TAG}, ${DIGEST})"
+                    else
+                      fail "Could not delete GHCR version ${ID}; delete it manually"
+                    fi
+                  done
+                  # Anything still tagged NEW_TAG is an orphan this run could not prove it created: report it.
+                  if ! LEFT=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                      --jq ".[] | select(any(.metadata.container.tags[]; . == \"${NEW_TAG}\")) | \"\(.id) \(.name)\""); then
+                    fail "Could not confirm that no version tagged ${NEW_TAG} remains; check GHCR manually."
+                  elif [[ -n "$LEFT" ]]; then
+                    fail "A GHCR version tagged ${NEW_TAG} remains that this run cannot prove it created (${LEFT}); delete it manually if it is an orphan."
+                  fi
+                fi
+              fi
+            fi
+          fi
+
+          if [[ "$FAILED" == 0 ]]; then
+            if [[ "$EXPOSED" == 1 ]]; then
+              note "Rollback complete: main, ${MAJOR_TAG} and the ${MAJOR_TAG}/latest images are as they were before this run; ${NEW_TAG} and its image are retained."
+            else
+              note "Rollback complete: main, ${MAJOR_TAG:-the major tag} and the ${MAJOR_TAG:-major}/latest images are as they were before this run."
+            fi
+          fi
+          exit "$FAILED"
