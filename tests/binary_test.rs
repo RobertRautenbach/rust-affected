@@ -234,13 +234,8 @@ fn env_github_output_writes_to_file() {
         ("GITHUB_OUTPUT", tmp.to_str().unwrap()),
     ]);
     assert!(ok);
-    // stdout should be empty when GITHUB_OUTPUT is set
-    assert!(
-        stdout.trim().is_empty(),
-        "stdout should be empty when GITHUB_OUTPUT is set, got: {stdout}"
-    );
-
     let contents = std::fs::read_to_string(&tmp).unwrap();
+    assert_eq!(stdout, contents);
     assert!(contents.contains("changed_crates="));
     assert!(contents.contains("affected_library_members="));
     assert!(contents.contains("affected_binary_members="));
