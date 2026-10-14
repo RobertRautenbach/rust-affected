@@ -18,6 +18,23 @@ impl Scratch {
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
+
+    fn workspace() -> Self {
+        let scratch = Self::new();
+        std::fs::create_dir_all(scratch.0.join("member/src")).unwrap();
+        std::fs::write(
+            scratch.0.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            scratch.0.join("member/Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(scratch.0.join("member/src/lib.rs"), "").unwrap();
+        scratch
+    }
 }
 
 impl Drop for Scratch {
@@ -155,4 +172,20 @@ fn output_destination_failures_are_errors() {
             .unwrap();
         assert_error(&output, key);
     }
+}
+
+#[test]
+fn metadata_preserves_existing_compiler_cache() {
+    let scratch = Scratch::workspace();
+    std::fs::create_dir(scratch.0.join("target")).unwrap();
+    let cache = scratch.0.join("target/.rustc_info.json");
+    let original = b"{\"rustc_fingerprint\":0,\"outputs\":{},\"successes\":{}}";
+    std::fs::write(&cache, original).unwrap();
+    let output = run(&scratch.0, &[("CHANGED_FILES", "member/src/lib.rs")]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(cache).unwrap(), original);
 }

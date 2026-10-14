@@ -45,7 +45,10 @@ fn run() -> Result<(), String> {
             "changed_files is empty; no files will be attributed. If files did change, check the step producing changed_files. Workspace and configuration validation still run.",
         )?;
     }
-    let graph = PackageGraph::from_command(&mut MetadataCommand::new())
+    let mut command = MetadataCommand::new();
+    // Metadata must not rewrite a consumer's compiler-version cache in target/.
+    command.env("CARGO_CACHE_RUSTC_INFO", "0");
+    let graph = PackageGraph::from_command(&mut command)
         .map_err(|error| format!("cargo metadata failed: {}", error_chain(&error)))?;
     let result = compute_affected(&graph, &changed_files, &force_triggers, &excluded)
         .map_err(|error| error.to_string())?;
