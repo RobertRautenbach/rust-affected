@@ -39,7 +39,11 @@ RUN TARGET="$(cat /rust-target)" && \
 # that configuration). This RUN executes on the target platform, so the release
 # build needs QEMU for the arm64 image.
 FROM rust:1.98.1-alpine3.23
-RUN apk add --no-cache git
+# Use the installed toolchain even when the checkout contains rust-toolchain.toml.
+# Derive the pin from the base image so dependency updates keep it in sync.
+ENV RUSTUP_TOOLCHAIN=${RUST_VERSION} RUSTUP_AUTO_INSTALL=0
+RUN test -n "${RUSTUP_TOOLCHAIN}" && rustup run "${RUSTUP_TOOLCHAIN}" cargo --version \
+    && apk add --no-cache git
 
 LABEL org.opencontainers.image.title="rust-affected"
 LABEL org.opencontainers.image.description="Computes affected Cargo workspace members from a set of changed files via the Cargo dependency graph"

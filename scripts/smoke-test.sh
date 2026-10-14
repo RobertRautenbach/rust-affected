@@ -15,6 +15,8 @@ IMAGE="${1:?usage: $0 IMAGE}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE="${REPO_ROOT}/tests/fixtures/workspace"
 TMP_PARENT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+TMP_PARENT="$(mktemp -d "${TMP_PARENT}/rust-affected-smoke-suite.XXXXXX")"
+trap 'rm -rf "${TMP_PARENT}"' EXIT
 
 FAILED=0
 CASES=0
@@ -63,8 +65,8 @@ run_case() {
     cat "${tmp}/stderr" >&2
     fail "${name}: container exited with status ${rc}"
   fi
-  if [[ -n "${stdout}" ]]; then
-    fail "${name}: expected empty stdout when GITHUB_OUTPUT is set, got: ${stdout}"
+  if [[ "${stdout}" != "${expected}" ]]; then
+    fail "${name}: stdout does not match the expected output lines: ${stdout}"
   fi
   if ! diff -u <(printf '%s\n' "${expected}") "${tmp}/set_output"; then
     fail "${name}: GITHUB_OUTPUT differs from the expected lines (diff above)"
@@ -105,6 +107,12 @@ run_failing_case() {
     cat "${tmp}/stderr" >&2
     fail "${name}: expected one matching error annotation"
   fi
+  local warnings
+  warnings="$(sed -n '/^::/p' "${tmp}/stderr" | sed '/^::error::/d')"
+  if [[ "${warnings}" != "${EXPECTED_ANNOTATIONS:-}" ]]; then
+    cat "${tmp}/stderr" >&2
+    fail "${name}: unexpected annotations alongside the error"
+  fi
   rm -rf "${tmp}"
 }
 
@@ -134,6 +142,12 @@ make_git_dependency_fixture() {
 
 fixture_before="$(snapshot "${REPO_ROOT}/tests/fixtures")"
 EMPTY_WARNING='::warning::changed_files is empty; no files will be attributed. If files did change, check the step producing changed_files. Workspace and configuration validation still run.'
+
+LOCK_WARNING='::warning::No Cargo.lock in the workspace root; cargo metadata will resolve dependencies and may create one (owned by root inside the action). Commit Cargo.lock to use --locked.'
+
+# This must name an installed toolchain, not merely happen to work online.
+docker run --rm --network none --entrypoint sh "${IMAGE}" -c \
+  'test "$RUSTUP_TOOLCHAIN" = "$RUST_VERSION" && test "$RUSTUP_AUTO_INSTALL" = 0 && rustup run "$RUSTUP_TOOLCHAIN" cargo --version'
 
 run_case "leaf library change" "${FIXTURE}" \
   "lib-utils/src/lib.rs" "" "" \
@@ -186,17 +200,74 @@ force_all=false'
 
 EMPTY_WS="$(mktemp -d "${TMP_PARENT}/rust-affected-empty.XXXXXX")"
 run_failing_case "missing workspace" "${EMPTY_WS}" "x" "" "" 'could not find'
-run_failing_case "empty missing workspace" "${EMPTY_WS}" "" "" "" 'could not find'
+EXPECTED_ANNOTATIONS="${EMPTY_WARNING}" run_failing_case "empty missing workspace" "${EMPTY_WS}" "" "" "" 'could not find'
 rm -rf "${EMPTY_WS}"
 run_failing_case "invalid glob" "${FIXTURE}" "x" "[abc" "" 'invalid force_triggers pattern'
-run_failing_case "empty invalid glob" "${FIXTURE}" "" "[abc" "" 'invalid force_triggers pattern'
+EXPECTED_ANNOTATIONS="${EMPTY_WARNING}" run_failing_case "empty invalid glob" "${FIXTURE}" "" "[abc" "" 'invalid force_triggers pattern'
+
+EXPECTED_ANNOTATIONS='::warning::excluded_members entries matched no workspace member: ["tools"]. Names match crate names exactly; use a trailing slash such as '"'"'tools/'"'"' to match a directory.' \
+run_case "unmatched exclusion" "${FIXTURE}" "app-alpha/src/main.rs" "" "tools" \
+'changed_crates=["app-alpha"]
+affected_library_members=[]
+affected_binary_members=["app-alpha"]
+force_all=false'
+
+EXPECTED_ANNOTATIONS='::warning::1 changed file(s) were ignored for attribution and force triggers: ["../x"]. Use paths relative to the workspace root or absolute paths beneath it; empty paths and '"'"'..'"'"' are not supported.' \
+run_case "unusable path cannot force" "${FIXTURE}" "../x" "**" "" \
+'changed_crates=[]
+affected_library_members=[]
+affected_binary_members=[]
+force_all=false'
+
+copy_fixture() {
+  mkdir -p "$1"
+  tar -C "${FIXTURE}" --exclude=target -cf - . | tar -C "$1" -xf -
+}
+
+LOCK_WS="${TMP_PARENT}/lock-workspace"
+copy_fixture "${LOCK_WS}"
+printf 'version = 4\n' > "${LOCK_WS}/Cargo.lock"
+lock_before="$(snapshot "${LOCK_WS}")"
+run_failing_case "stale lock" "${LOCK_WS}" "lib-utils/src/lib.rs" "" "" 'lock file'
+EXPECTED_ANNOTATIONS="${EMPTY_WARNING}" run_failing_case "empty input with stale lock" "${LOCK_WS}" "" "" "" 'lock file'
+if [[ "${lock_before}" != "$(snapshot "${LOCK_WS}")" ]]; then
+  fail "stale lock failures modified the workspace"
+fi
+# Use a fresh mount: Docker Desktop can retain stale stat data after host deletion.
+MISSING_LOCK_WS="${TMP_PARENT}/missing-lock-workspace"
+copy_fixture "${MISSING_LOCK_WS}"
+rm "${MISSING_LOCK_WS}/Cargo.lock"
+EXPECTED_ANNOTATIONS="${LOCK_WARNING}" run_case "missing lock" "${MISSING_LOCK_WS}" "app-alpha/src/main.rs" "" "" \
+'changed_crates=["app-alpha"]
+affected_library_members=[]
+affected_binary_members=["app-alpha"]
+force_all=false'
+[[ -f "${MISSING_LOCK_WS}/Cargo.lock" ]] || fail "missing-lock fallback did not create a lockfile"
+
+TOOLCHAIN_WS="${TMP_PARENT}/toolchain-workspace"
+copy_fixture "${TOOLCHAIN_WS}"
+printf '[toolchain]\nchannel = "1.80.0"\n' > "${TOOLCHAIN_WS}/rust-toolchain.toml"
+# Include an existing cache so the snapshot detects even metadata-only writes.
+mkdir -p "${TOOLCHAIN_WS}/target"
+printf '{"rustc_fingerprint":0,"outputs":{},"successes":{}}' > "${TOOLCHAIN_WS}/target/.rustc_info.json"
+toolchain_before="$(snapshot "${TOOLCHAIN_WS}")"
+run_case "consumer toolchain ignored offline" "${TOOLCHAIN_WS}" "lib-utils/src/lib.rs" "" "" \
+'changed_crates=["lib-utils"]
+affected_library_members=["lib-core","lib-core-ext","lib-utils"]
+affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+force_all=false' --network none
+run_failing_case "unpinned toolchain fails without installing" "${TOOLCHAIN_WS}" "lib-utils/src/lib.rs" "" "" 'is not installed' \
+  --network none -e RUSTUP_TOOLCHAIN=
+if [[ "${toolchain_before}" != "$(snapshot "${TOOLCHAIN_WS}")" ]]; then
+  fail "toolchain cases modified the workspace"
+fi
 
 # The dependency repository is owned by the host user while the container runs
 # as root, and git refuses to serve a repository owned by someone else unless it
 # is marked safe. Consumers fetch remote repositories, so this is a test-only
 # concern; the GIT_CONFIG_* variables mark every directory safe for this run.
 make_git_dependency_fixture
-run_case "git dependency fetched with the git CLI" "${GITWS}" \
+EXPECTED_ANNOTATIONS="${LOCK_WARNING}" run_case "git dependency fetched with the git CLI" "${GITWS}" \
   "consumer/src/lib.rs" "" "" \
 'changed_crates=["consumer"]
 affected_library_members=["consumer"]

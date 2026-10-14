@@ -58,7 +58,7 @@ affected_binary_members=["app-alpha","app-beta","tool-alpha"]
 force_all=false
 ```
 
-The action also writes a job summary to the workflow run:
+The action logs the four output lines and writes a job summary to the workflow run:
 
 > ## rust-affected
 >
@@ -150,6 +150,16 @@ Empty input produces a warning and empty results after validating the workspace 
 | `affected_library_members` | JSON array of affected workspace members that are pure library crates (no binary target) |
 | `affected_binary_members` | JSON array of affected workspace members that have a binary target; mutually exclusive with `affected_library_members` |
 | `force_all` | `"true"` if a force-trigger file changed, otherwise `"false"` |
+
+## Inside the container
+
+The action discovers the workspace root with `cargo locate-project --workspace`, then runs `cargo metadata --all-features`. When that root contains `Cargo.lock`, metadata uses `--locked`: **a stale committed lockfile now fails the step instead of being rewritten**. Update and commit the lockfile before rerunning. Locked resolution can still fetch dependencies; it is not offline mode.
+
+When the lockfile is missing, the action warns and continues with unlocked metadata for compatibility. Cargo may create a lockfile owned by root in the checkout. This also applies when `changed_files` is empty, because workspace validation still runs. Commit a current `Cargo.lock` to avoid this fallback. Compiler-version caching is disabled during Cargo inspection so existing `target/.rustc_info.json` files are preserved.
+
+The image sets `RUSTUP_TOOLCHAIN` to its installed Rust version and disables automatic installation with `RUSTUP_AUTO_INSTALL=0`. A consumer `rust-toolchain.toml` does not select or download another metadata toolchain. A step-level override of `RUSTUP_TOOLCHAIN` selects that toolchain instead; if it is unavailable, the step fails without installing it while auto-installation remains disabled. This does not change the toolchain used by other build steps.
+
+Cargo stderr is forwarded to the job log on success and failure, with terminal colors disabled. Failures produce one action-generated `::error::` annotation and exit 1. Warnings are grouped by input problem. After successful output and summary writes, the four output lines are echoed into the job log. Local runs without `GITHUB_OUTPUT` still print one JSON object. Output files are append-only; a write failure is reported, but partially written data cannot be rolled back.
 
 ## Migrating from v3
 

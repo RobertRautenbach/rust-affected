@@ -292,6 +292,16 @@ fn missing_cargo_executable_is_a_handled_error() {
 }
 
 #[cfg(unix)]
+#[test]
+fn lock_inspection_errors_do_not_enable_unlocked_resolution() {
+    let scratch = Scratch::workspace();
+    std::os::unix::fs::symlink("Cargo.lock", scratch.0.join("Cargo.lock")).unwrap();
+    let output = run(&scratch.0, &[("CHANGED_FILES", "member/src/lib.rs")]);
+    assert_error(&output, "failed to inspect workspace Cargo.lock");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("No Cargo.lock"));
+}
+
+#[cfg(unix)]
 fn fake_cargo(scratch: &Scratch, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = scratch.0.join("cargo");
