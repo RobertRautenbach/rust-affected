@@ -21,6 +21,7 @@ fn run_binary(envs: &[(&str, &str)]) -> (String, bool) {
     cmd.current_dir(fixture_dir());
     // Clear env vars that could interfere
     cmd.env_remove("GITHUB_OUTPUT");
+    cmd.env_remove("GITHUB_STEP_SUMMARY");
     cmd.env_remove("CHANGED_FILES");
     cmd.env_remove("FORCE_TRIGGERS");
     cmd.env_remove("EXCLUDED_MEMBERS");

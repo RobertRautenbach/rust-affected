@@ -26,18 +26,20 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
 
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --target "$(cat /rust-target)" --recipe-path recipe.json
+RUN cargo chef cook --release --locked --target "$(cat /rust-target)" --recipe-path recipe.json
 
 COPY . .
 RUN TARGET="$(cat /rust-target)" && \
-    cargo build --release --target "$TARGET" -p rust-affected && \
+    cargo build --release --locked --target "$TARGET" -p rust-affected && \
     cp "target/$TARGET/release/rust-affected" /rust-affected
 
+# The binary shells out to `cargo metadata`, so the runtime image needs a Rust
+# toolchain. This stage has no RUN instruction: the arm64 image is assembled from
+# the cross-compiled binary without emulation.
 FROM rust:1.98.1-alpine3.23
-RUN apk add --no-cache git
 
 LABEL org.opencontainers.image.title="rust-affected"
-LABEL org.opencontainers.image.description="Detects changed files and computes affected Cargo workspace members via the dependency graph"
+LABEL org.opencontainers.image.description="Computes affected Cargo workspace members from a set of changed files via the Cargo dependency graph"
 LABEL org.opencontainers.image.source="https://github.com/robertrautenbach/rust-affected"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.authors="Robert Rautenbach"

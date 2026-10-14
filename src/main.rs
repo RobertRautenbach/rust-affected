@@ -1,4 +1,4 @@
-use guppy::{graph::PackageGraph, MetadataCommand};
+use guppy::{MetadataCommand, graph::PackageGraph};
 use rust_affected::compute_affected;
 use std::env;
 use std::io::Write;

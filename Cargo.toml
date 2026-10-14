@@ -2,6 +2,11 @@
 name = "rust-affected"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.91"
+description = "Computes affected Cargo workspace members from a set of changed files via the Cargo dependency graph"
+license = "MIT"
+repository = "https://github.com/robertrautenbach/rust-affected"
+publish = false
 
 [lib]
 name = "rust_affected"
