@@ -137,6 +137,12 @@ jobs:
             Organization) PKG_API="orgs/${OWNER}" ;;
             *) echo "::error::Cannot determine owner type for ${OWNER}."; exit 1 ;;
           esac
+          EXISTING_IMAGE=$(ghcr_digest_for_tag "${NEW_TAG}") \
+            || { echo "::error::Could not check whether GHCR already has an image tagged ${NEW_TAG}."; exit 1; }
+          if [[ -n "$EXISTING_IMAGE" ]]; then
+            echo "::error::GHCR already has an image tagged ${NEW_TAG} (${EXISTING_IMAGE}) that this run did not build. Delete that package version before releasing ${NEW_TAG}."
+            exit 1
+          fi
           PREV_MAJOR_SHA=$(git ls-remote origin "refs/tags/${MAJOR_TAG}" | awk 'NR==1 {print $1}')
           PREV_MAJOR_DIGEST=$(ghcr_digest_for_tag "${MAJOR_TAG}") \
             || { echo "::error::Could not look up which image currently carries the ${MAJOR_TAG} tag in GHCR."; exit 1; }
@@ -268,6 +274,9 @@ jobs:
 
       - name: Roll back (only what this run changed)
         if: failure() || cancelled()
+        env:
+          # Digest of the image this run pushed (empty if the build never pushed); the only image rollback may delete.
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -uo pipefail
           FAILED=0
@@ -395,22 +404,55 @@ jobs:
             fi
           fi
 
-          # 5. GHCR version(s) carrying only tags created by this run (never a pre-existing vX/latest).
+          # 5. The GHCR version this run pushed. Deleted only when all three hold:
+          #    (a) this run recorded the digest it pushed (never an image it did not build);
+          #    (b) no git reference consumers resolve (vX, vX.Y.Z, main) still pins that image, verified live
+          #        right now rather than inferred from the steps above;
+          #    (c) the version carries only tags created by this run (never a pre-existing vX/latest).
           if [[ -n "${PKG_API:-}" ]] && [[ -n "${NEW_TAG:-}" ]]; then
-            OWNED="\"${NEW_TAG}\""
-            [[ -z "${PREV_MAJOR_DIGEST:-}" ]] && OWNED="${OWNED},\"${MAJOR_TAG}\""
-            [[ -z "${PREV_LATEST_DIGEST:-}" ]] && OWNED="${OWNED},\"latest\""
-            if ! IDS=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
-                --jq ".[] | select(any(.metadata.container.tags[]; . == \"${NEW_TAG}\")) | select(all(.metadata.container.tags[]; IN(${OWNED}))) | .id"); then
-              fail "Could not list GHCR versions; if the ${NEW_TAG} image was pushed, delete it manually."
+            if [[ ! "${BUILD_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              note "This run pushed no image; nothing to delete in GHCR."
             else
-              for ID in $IDS; do
-                if gh api --method DELETE "${PKG_API}/packages/container/${PACKAGE}/versions/${ID}"; then
-                  note "Deleted GHCR version ${ID} (${NEW_TAG})"
-                else
-                  fail "Could not delete GHCR version ${ID}; delete it manually"
+              PRESERVE=0
+              if [[ -n "${RELEASE_COMMIT:-}" ]]; then
+                for REF in "refs/tags/${MAJOR_TAG}" "refs/tags/${NEW_TAG}"; do
+                  if ! LS=$(git ls-remote origin "$REF"); then
+                    fail "Could not verify ${REF}; preserving the ${NEW_TAG} image."
+                    PRESERVE=1
+                  elif [[ "$(printf '%s\n' "$LS" | awk 'NR==1 {print $1}')" == "$RELEASE_COMMIT" ]]; then
+                    fail "${REF} still points at ${RELEASE_COMMIT}, which pins the ${NEW_TAG} image; preserving it."
+                    PRESERVE=1
+                  fi
+                done
+                if ! git fetch -q origin main; then
+                  fail "Could not fetch origin/main; preserving the ${NEW_TAG} image."
+                  PRESERVE=1
+                elif ! MAIN_ACTION=$(git show origin/main:action.yml 2>/dev/null); then
+                  fail "Could not read action.yml at origin/main; preserving the ${NEW_TAG} image."
+                  PRESERVE=1
+                elif [[ "$MAIN_ACTION" == *"${BUILD_DIGEST}"* ]]; then
+                  fail "origin/main still pins the ${NEW_TAG} image; preserving it."
+                  PRESERVE=1
                 fi
-              done
+              fi
+              if [[ "$PRESERVE" == 0 ]]; then
+                OWNED="\"${NEW_TAG}\""
+                [[ -z "${PREV_MAJOR_DIGEST:-}" ]] && OWNED="${OWNED},\"${MAJOR_TAG}\""
+                [[ -z "${PREV_LATEST_DIGEST:-}" ]] && OWNED="${OWNED},\"latest\""
+                if ! IDS=$(gh api --paginate "${PKG_API}/packages/container/${PACKAGE}/versions?per_page=100" \
+                    --jq ".[] | select(.name == \"${BUILD_DIGEST}\") | select(any(.metadata.container.tags[]; . == \"${NEW_TAG}\")) | select(all(.metadata.container.tags[]; IN(${OWNED}))) | .id"); then
+                  fail "Could not list GHCR versions; delete the ${NEW_TAG} image (${BUILD_DIGEST}) manually."
+                else
+                  [[ -z "$IDS" ]] && note "No GHCR version matches ${BUILD_DIGEST} with only this run's tags; nothing deleted."
+                  for ID in $IDS; do
+                    if gh api --method DELETE "${PKG_API}/packages/container/${PACKAGE}/versions/${ID}"; then
+                      note "Deleted GHCR version ${ID} (${NEW_TAG}, ${BUILD_DIGEST})"
+                    else
+                      fail "Could not delete GHCR version ${ID}; delete it manually"
+                    fi
+                  done
+                fi
+              fi
             fi
           fi
 
