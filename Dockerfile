@@ -34,9 +34,12 @@ RUN TARGET="$(cat /rust-target)" && \
     cp "target/$TARGET/release/rust-affected" /rust-affected
 
 # The binary shells out to `cargo metadata`, so the runtime image needs a Rust
-# toolchain. This stage has no RUN instruction: the arm64 image is assembled from
-# the cross-compiled binary without emulation.
+# toolchain. git stays too: when a consumer sets `net.git-fetch-with-cli = true`
+# cargo fetches git dependencies by spawning the git CLI (the smoke test covers
+# that configuration). This RUN executes on the target platform, so the release
+# build needs QEMU for the arm64 image.
 FROM rust:1.98.1-alpine3.23
+RUN apk add --no-cache git
 
 LABEL org.opencontainers.image.title="rust-affected"
 LABEL org.opencontainers.image.description="Computes affected Cargo workspace members from a set of changed files via the Cargo dependency graph"
