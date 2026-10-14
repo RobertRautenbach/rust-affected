@@ -423,7 +423,12 @@ jobs:
                   fail "Could not restore ${IMAGE}:$1 -> $2"
                 fi
               else
-                note "${IMAGE}:$1 did not exist before this run; it is removed together with the new version below"
+                if [[ "$EXPOSED" == 1 ]]; then
+                  # GHCR cannot delete a single tag, and the image is retained because the release commit was exposed.
+                  fail "${IMAGE}:$1 did not exist before this run and now points at the retained ${NEW_TAG} image (${IMAGE_DIGEST}). It cannot be removed without deleting that image. Recovery: the next successful release re-points it; to remove it sooner, delete the GHCR package version ${IMAGE_DIGEST} once no consumer pins it."
+                else
+                  note "${IMAGE}:$1 did not exist before this run; it is removed together with the new version below"
+                fi
               fi
             }
             restore_image_tag "${MAJOR_TAG}" "${PREV_MAJOR_DIGEST:-}"
