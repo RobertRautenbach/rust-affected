@@ -1,8 +1,9 @@
-use guppy::{MetadataCommand, graph::PackageGraph};
 use rust_affected::AffectedResult;
+use rust_affected::WorkspaceGraph;
+use std::process::Command;
 
 fn compute_affected(
-    graph: &PackageGraph,
+    graph: &WorkspaceGraph,
     files: &[String],
     triggers: &[String],
     excluded: &HashSet<String>,
@@ -13,15 +14,28 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-fn fixture_graph() -> &'static PackageGraph {
-    static GRAPH: OnceLock<PackageGraph> = OnceLock::new();
+fn fixture_graph() -> &'static WorkspaceGraph {
+    static GRAPH: OnceLock<WorkspaceGraph> = OnceLock::new();
     GRAPH.get_or_init(|| {
         let fixture_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "fixtures", "workspace"]
             .iter()
             .collect();
-        let mut cmd = MetadataCommand::new();
-        cmd.current_dir(&fixture_dir).other_options(["--locked"]);
-        PackageGraph::from_command(&mut cmd).expect("Failed to load fixture package graph")
+        let output = Command::new(env!("CARGO"))
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--all-features",
+                "--no-deps",
+                "--locked",
+                "--offline",
+            ])
+            .env("CARGO_CACHE_RUSTC_INFO", "0")
+            .current_dir(&fixture_dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        WorkspaceGraph::from_json(std::str::from_utf8(&output.stdout).unwrap()).unwrap()
     })
 }
 

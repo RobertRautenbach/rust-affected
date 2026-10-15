@@ -132,7 +132,7 @@ Use `all_modified_files` because `all_changed_files` omits deletions. The rename
 
 ## How files map to crates
 
-Each valid changed path belongs to the workspace member with the deepest matching directory. A file in `parent/nested/` belongs to that member, not also to `parent/`. Dependents are then found through the Cargo graph, including through excluded members. Exclusions filter results without transferring ownership to another member.
+Each valid changed path belongs to the workspace member with the deepest matching directory. A file in `parent/nested/` belongs to that member, not also to `parent/`. Dependents are then found through the workspace path-dependency graph, including through excluded members. Exclusions filter results without transferring ownership to another member.
 
 If the workspace root is a package, it owns paths outside other members, including root documentation and configuration. This is conservative directory attribution; it does not apply `cargo package` inclusion rules. In a virtual workspace, paths outside members have no owner unless they match a force trigger. Configure shared manifests and configuration as force triggers when they should affect the entire workspace.
 
@@ -153,9 +153,11 @@ Empty input produces a warning and empty results after validating the workspace 
 
 ## Inside the container
 
-The action discovers the workspace root with `cargo locate-project --workspace`, then runs `cargo metadata --all-features`. When that root contains `Cargo.lock`, metadata uses `--locked`: **a stale committed lockfile now fails the step instead of being rewritten**. Update and commit the lockfile before rerunning. Locked resolution can still fetch dependencies; it is not offline mode.
+The action runs `cargo metadata --format-version 1 --all-features --no-deps`. Cargo reads workspace manifests without resolving or fetching dependency sources, so registry and Git dependencies need no cache, credentials, or network access. The runtime image no longer installs Git.
 
-When the lockfile is missing, the action warns and continues with unlocked metadata for compatibility. Cargo may create a lockfile owned by root in the checkout. This also applies when `changed_files` is empty, because workspace validation still runs. Commit a current `Cargo.lock` to avoid this fallback. Compiler-version caching is disabled during Cargo inspection so existing `target/.rustc_info.json` files are preserved.
+`Cargo.lock` is not inspected or modified: stale or malformed locks do not fail the action, and missing locks are not created or warned about. This also applies to empty input and runs from a member directory. A changed `Cargo.lock` can still activate a configured force trigger. Compiler-version caching remains disabled during Cargo inspection so existing `target/.rustc_info.json` files are preserved.
+
+The graph follows declared `path` dependencies whose manifest directories belong to workspace members. Normal, build, dev, optional, renamed, inherited, and target-specific path dependencies are included, regardless of the active host target or default features. Traversal is cycle-safe, and exclusions do not prune it. Registry/Git dependencies, including registry dependencies redirected by patches, and paths through non-workspace packages are not resolved into member edges. Configure a force trigger for changes that should invalidate the whole workspace in those layouts.
 
 The image sets `RUSTUP_TOOLCHAIN` to its installed Rust version and disables automatic installation with `RUSTUP_AUTO_INSTALL=0`. A consumer `rust-toolchain.toml` does not select or download another metadata toolchain. A step-level override of `RUSTUP_TOOLCHAIN` selects that toolchain instead; if it is unavailable, the step fails without installing it while auto-installation remains disabled. This does not change the toolchain used by other build steps.
 

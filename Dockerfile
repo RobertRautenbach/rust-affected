@@ -33,17 +33,12 @@ RUN TARGET="$(cat /rust-target)" && \
     cargo build --release --locked --target "$TARGET" -p rust-affected && \
     cp "target/$TARGET/release/rust-affected" /rust-affected
 
-# The binary shells out to `cargo metadata`, so the runtime image needs a Rust
-# toolchain. git stays too: when a consumer sets `net.git-fetch-with-cli = true`
-# cargo fetches git dependencies by spawning the git CLI (the smoke test covers
-# that configuration). This RUN executes on the target platform, so the release
-# build needs QEMU for the arm64 image.
+# Workspace-only metadata needs Cargo, but never fetches dependency sources.
+# Keep this target-platform stage RUN-free so cross-builds do not need QEMU.
 FROM rust:1.98.1-alpine3.23
 # Use the installed toolchain even when the checkout contains rust-toolchain.toml.
 # Derive the pin from the base image so dependency updates keep it in sync.
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION} RUSTUP_AUTO_INSTALL=0
-RUN test -n "${RUSTUP_TOOLCHAIN}" && rustup run "${RUSTUP_TOOLCHAIN}" cargo --version \
-    && apk add --no-cache git
 
 LABEL org.opencontainers.image.title="rust-affected"
 LABEL org.opencontainers.image.description="Computes affected Cargo workspace members from a set of changed files via the Cargo dependency graph"
