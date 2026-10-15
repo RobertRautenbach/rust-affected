@@ -29,7 +29,7 @@ jobs:
 
       - name: Detect affected packages
         id: affected
-        uses: robertrautenbach/rust-affected@v4.3.0
+        uses: robertrautenbach/rust-affected@v4.3.1
         with:
           changed_files: ${{ steps.changed.outputs.all_modified_files }}
           force_triggers: |
@@ -95,7 +95,7 @@ You provide the list of changed files — here are common approaches:
     quotepath: false
     output_renamed_files_as_deleted_and_added: true
 
-- uses: robertrautenbach/rust-affected@v4.3.0
+- uses: robertrautenbach/rust-affected@v4.3.1
   with:
     changed_files: ${{ steps.changed.outputs.all_modified_files }}
 ```
@@ -115,7 +115,7 @@ Use `all_modified_files` because `all_changed_files` omits deletions. The rename
     files="$(git -c core.quotepath=false diff --no-renames --name-only "$BASE_SHA"..HEAD | tr '\n' ' ')"
     printf 'files=%s\n' "$files" >> "$GITHUB_OUTPUT"
 
-- uses: robertrautenbach/rust-affected@v4.3.0
+- uses: robertrautenbach/rust-affected@v4.3.1
   with:
     changed_files: ${{ steps.changed.outputs.files }}
 ```
@@ -205,7 +205,7 @@ v4 is a breaking change. The action no longer detects changed files itself — y
     quotepath: false
     output_renamed_files_as_deleted_and_added: true
 
-- uses: robertrautenbach/rust-affected@v4.3.0
+- uses: robertrautenbach/rust-affected@v4.3.1
   with:
     changed_files: ${{ steps.changed.outputs.all_modified_files }}
 ```
