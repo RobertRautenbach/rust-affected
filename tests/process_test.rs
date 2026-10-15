@@ -196,30 +196,32 @@ fn metadata_preserves_existing_compiler_cache() {
 }
 
 #[test]
-fn stale_locks_are_ignored_from_root_or_member() {
+fn stale_locks_fail_without_rewriting_from_root_or_member() {
     for directory in ["", "member"] {
         for changed in ["", "member/src/lib.rs"] {
             let scratch = Scratch::workspace();
             let lock = scratch.0.join("Cargo.lock");
             std::fs::write(&lock, "version = 4\n").unwrap();
             let output = run(&scratch.0.join(directory), &[("CHANGED_FILES", changed)]);
-            assert!(output.status.success(), "{output:?}");
-            assert!(!String::from_utf8_lossy(&output.stderr).contains("Cargo.lock"));
+            assert_error(&output, "lock file");
             assert_eq!(std::fs::read_to_string(lock).unwrap(), "version = 4\n");
         }
     }
 }
 
 #[test]
-fn missing_locks_are_not_created_even_without_changes() {
+fn missing_locks_warn_and_are_created_even_without_changes() {
     for directory in ["", "member"] {
         for changed in ["", "member/src/lib.rs"] {
             let scratch = Scratch::workspace();
             let output = run(&scratch.0.join(directory), &[("CHANGED_FILES", changed)]);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(output.status.success(), "{stderr}");
-            assert!(!stderr.contains("Cargo.lock"), "{stderr}");
-            assert!(!scratch.0.join("Cargo.lock").exists());
+            assert!(
+                stderr.contains("::warning::No Cargo.lock in the workspace root"),
+                "{stderr}"
+            );
+            assert!(scratch.0.join("Cargo.lock").is_file());
             assert!(!scratch.0.join("member/Cargo.lock").exists());
         }
     }
@@ -286,16 +288,16 @@ fn missing_cargo_executable_is_a_handled_error() {
         .env("CARGO", scratch.0.join("missing-cargo"))
         .output()
         .unwrap();
-    assert_error(&output, "failed to start cargo metadata");
+    assert_error(&output, "failed to start cargo locate-project");
 }
 
 #[cfg(unix)]
 #[test]
-fn unreadable_lockfiles_are_not_inspected() {
+fn lock_inspection_errors_do_not_enable_unlocked_resolution() {
     let scratch = Scratch::workspace();
     std::os::unix::fs::symlink("Cargo.lock", scratch.0.join("Cargo.lock")).unwrap();
     let output = run(&scratch.0, &[("CHANGED_FILES", "member/src/lib.rs")]);
-    assert!(output.status.success(), "{output:?}");
+    assert_error(&output, "failed to inspect workspace Cargo.lock");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("No Cargo.lock"));
 }
 
@@ -303,7 +305,7 @@ fn unreadable_lockfiles_are_not_inspected() {
 fn fake_cargo(scratch: &Scratch, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = scratch.0.join("cargo");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::write(&path, format!("#!/bin/sh\nif [ \"$1\" = locate-project ]; then\n  printf '%s\\n' \"$FAKE_MANIFEST\"\n  exit 0\nfi\n{body}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
 }
@@ -326,6 +328,7 @@ fn malformed_metadata_and_failed_cargo_have_context() {
         let output = command(&fixture())
             .env("CHANGED_FILES", "x")
             .env("CARGO", executable)
+            .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
             .output()
             .unwrap();
         assert_error(&output, message);
@@ -342,7 +345,7 @@ fn successful_cargo_stderr_is_forwarded_and_graph_errors_are_handled() {
             "--format-version",
             "1",
             "--all-features",
-            "--no-deps",
+            "--locked",
             "--offline",
         ])
         .current_dir(fixture())
@@ -355,7 +358,7 @@ fn successful_cargo_stderr_is_forwarded_and_graph_errors_are_handled() {
         &scratch,
         r#"
 [ "$CARGO_TERM_COLOR" = never ] && [ "$RUSTUP_TERM_COLOR" = never ] && [ "$CARGO_CACHE_RUSTC_INFO" = 0 ] || exit 8
-[ "$*" = 'metadata --format-version 1 --all-features --no-deps' ] || exit 9
+[ "$*" = 'metadata --format-version 1 --all-features --locked' ] || exit 9
 printf 'cargo notice: retained\n' >&2
 printf 'prelude before JSON\n'
 cat "$FAKE_METADATA"
@@ -370,6 +373,7 @@ cat "$FAKE_METADATA"
         let output = command(&fixture())
             .env("CHANGED_FILES", "lib-core/src/lib.rs")
             .env("CARGO", &executable)
+            .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
             .env("FAKE_METADATA", &metadata_path)
             .env("CARGO_TERM_COLOR", "always")
             .env("RUSTUP_TERM_COLOR", "always")
@@ -566,46 +570,125 @@ fn real_output_write_failures_exit_one() {
 }
 
 #[test]
-fn registry_and_git_dependencies_need_no_cache_or_network() {
+fn unavailable_sources_fail_without_publishing_partial_results() {
     for dependency in [
         "unavailable-registry-crate = \"99\"",
         "unavailable-git-crate = { git = \"https://example.invalid/never-fetch\" }",
     ] {
-        let scratch = Scratch::workspace();
-        let manifest = scratch.0.join("member/Cargo.toml");
-        let contents = std::fs::read_to_string(&manifest).unwrap();
-        std::fs::write(
-            &manifest,
-            format!("{contents}\n[dependencies]\n{dependency}\n"),
-        )
-        .unwrap();
-        let cache = scratch.0.join("cargo-home");
-        let output = command(&scratch.0)
-            .env("CARGO_HOME", &cache)
-            .env("CHANGED_FILES", "member/src/lib.rs")
-            .output()
+        for changed in ["", "member/src/lib.rs"] {
+            let scratch = Scratch::workspace();
+            let manifest = scratch.0.join("member/Cargo.toml");
+            let contents = std::fs::read_to_string(&manifest).unwrap();
+            std::fs::write(
+                &manifest,
+                format!("{contents}\n[dependencies]\n{dependency}\n"),
+            )
             .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(output.stderr, Vec::<u8>::new());
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-            serde_json::json!({
-                "changed_crates": ["member"], "affected_library_members": ["member"],
-                "affected_binary_members": [], "force_all": false,
-            })
-        );
-        assert!(!cache.join("registry").exists());
-        assert!(!cache.join("git").exists());
-        assert!(!scratch.0.join("Cargo.lock").exists());
+            let output_path = scratch.0.join("output");
+            let summary_path = scratch.0.join("summary");
+            std::fs::write(&output_path, "sentinel\n").unwrap();
+            std::fs::write(&summary_path, "sentinel\n").unwrap();
+            let output = command(&scratch.0)
+                .env("CARGO_HOME", scratch.0.join("cargo-home"))
+                .env("CHANGED_FILES", changed)
+                .env("GITHUB_OUTPUT", &output_path)
+                .env("GITHUB_STEP_SUMMARY", &summary_path)
+                .output()
+                .unwrap();
+            assert_error(&output, "cargo metadata failed");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.find("No Cargo.lock").unwrap() < stderr.find("error:").unwrap());
+            assert_eq!(std::fs::read_to_string(output_path).unwrap(), "sentinel\n");
+            assert_eq!(std::fs::read_to_string(summary_path).unwrap(), "sentinel\n");
+        }
     }
 }
 
 #[test]
-fn malformed_lockfiles_are_not_read() {
+fn malformed_lockfiles_fail_without_modification() {
+    for directory in ["", "member"] {
+        for changed in ["", "member/src/lib.rs"] {
+            let scratch = Scratch::workspace();
+            let lock = scratch.0.join("Cargo.lock");
+            std::fs::write(&lock, b"not toml\xff").unwrap();
+            let output = run(&scratch.0.join(directory), &[("CHANGED_FILES", changed)]);
+            assert_error(&output, "cargo metadata failed");
+            assert_eq!(std::fs::read(lock).unwrap(), b"not toml\xff");
+        }
+    }
+}
+
+#[test]
+fn git_source_patch_uses_cargos_selected_workspace_identity() {
     let scratch = Scratch::workspace();
-    let lock = scratch.0.join("Cargo.lock");
-    std::fs::write(&lock, b"not toml\xff").unwrap();
-    let output = run(&scratch.0, &[("CHANGED_FILES", "member/src/lib.rs")]);
+    let repo = Scratch::new();
+    std::fs::create_dir(repo.0.join("src")).unwrap();
+    std::fs::write(
+        repo.0.join("Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.0.join("src/lib.rs"), "").unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(&repo.0)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let url = format!("file://{}", repo.0.display());
+    std::fs::create_dir_all(scratch.0.join("app/src")).unwrap();
+    std::fs::write(scratch.0.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(scratch.0.join("app/Cargo.toml"), format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nrenamed = {{ package = \"member\", git = \"{url}\" }}\n")).unwrap();
+    std::fs::write(scratch.0.join("Cargo.toml"), format!("[workspace]\nmembers = [\"member\", \"app\"]\nresolver = \"2\"\n[patch.\"{url}\"]\nmember = {{ path = \"member\" }}\n")).unwrap();
+    let cache = scratch.0.join("cargo-home");
+    let metadata = Command::new(env!("CARGO"))
+        .current_dir(&scratch.0)
+        .args(["metadata", "--format-version", "1", "--all-features"])
+        .env("CARGO_HOME", &cache)
+        .env("CARGO_NET_OFFLINE", "false")
+        .env("CARGO_CACHE_RUSTC_INFO", "0")
+        .output()
+        .unwrap();
+    assert!(metadata.status.success(), "{metadata:?}");
+    let data: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+    let packages = data["packages"].as_array().unwrap();
+    let member = packages.iter().find(|p| p["name"] == "member").unwrap();
+    assert!(member["source"].is_null());
+    let app = packages.iter().find(|p| p["name"] == "app").unwrap();
+    let node = data["resolve"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == app["id"])
+        .unwrap();
+    assert_eq!(node["deps"][0]["pkg"], member["id"]);
+    let output = command(&scratch.0)
+        .env("CARGO_HOME", &cache)
+        .env("CHANGED_FILES", "member/src/lib.rs")
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(std::fs::read(lock).unwrap(), b"not toml\xff");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["affected_binary_members"],
+        serde_json::json!(["app"])
+    );
 }

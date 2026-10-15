@@ -1,0 +1,6 @@
+[workspace]
+members = ["core", "app"]
+resolver = "2"
+
+[patch.crates-io]
+core-alias = { package = "resolution-core", path = "core" }
