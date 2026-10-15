@@ -460,7 +460,7 @@ cat "$FAKE_METADATA"
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert!(output.stderr.is_empty());
+            assert_eq!(output.stderr, Vec::<u8>::new());
             let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(json["changed_crates"], serde_json::json!(["lib-core"]));
         } else {
