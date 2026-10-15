@@ -221,12 +221,7 @@ jobs:
           echo "Pushed ${IMAGE}:${NEW_TAG}@${BUILD_DIGEST}"
 
       - name: Smoke-test the release digest on both architectures
-        run: |
-          set -euo pipefail
-          for ARCH in amd64 arm64; do
-            docker pull --platform "linux/${ARCH}" "${IMAGE}@${IMAGE_DIGEST}"
-            DOCKER_DEFAULT_PLATFORM="linux/${ARCH}" scripts/smoke-test.sh "${IMAGE}@${IMAGE_DIGEST}"
-          done
+        run: scripts/smoke-test-release.sh "${IMAGE}" "${IMAGE_DIGEST}"
 
       - name: Pin action.yml to the new image, update README, push release commit and version tag
         run: |

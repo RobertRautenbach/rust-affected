@@ -73,33 +73,62 @@ jobs:
         run: cargo check --all-targets --locked
 
   docker-smoke:
-    name: Docker build and smoke test (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
+    name: Multi-platform release smoke test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test release helper
+        run: |
+          bash -n scripts/smoke-test-release.sh scripts/test-smoke-test-release.sh
+          shellcheck scripts/smoke-test-release.sh scripts/test-smoke-test-release.sh
+          scripts/test-smoke-test-release.sh
+      - name: Configure classic Docker image store
+        run: |
+          set -euo pipefail
+          sudo systemctl stop docker.service docker.socket
+          config=$(sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}')
+          jq '.features["containerd-snapshotter"] = false | .["storage-driver"] = "overlay2"' <<< "$config" | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
+          test "$(docker info --format '{{.Driver}}')" = overlay2
+      - name: Start temporary registry
+        run: docker run -d --name release-test-registry -p 5000:5000 registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Build image
+        with:
+          driver-opts: network=host
+      - name: Build and push candidate to temporary registry
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          platforms: linux/${{ matrix.arch }}
-          load: true
-          push: false
-          tags: rust-affected:ci-${{ matrix.arch }}
-          cache-from: type=gha,scope=smoke-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=smoke-${{ matrix.arch }}
-      - name: Run the image against the fixture workspace
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: localhost:5000/rust-affected:ci
+          cache-from: type=gha,scope=release-smoke
+          cache-to: type=gha,mode=max,scope=release-smoke
+      - name: Reproduce shared-index pull collision
         env:
-          DOCKER_DEFAULT_PLATFORM: linux/${{ matrix.arch }}
-        run: scripts/smoke-test.sh rust-affected:ci-${{ matrix.arch }}
+          INDEX_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image="localhost:5000/rust-affected@${INDEX_DIGEST}"
+          docker pull --platform linux/amd64 "$image"
+          if docker pull --platform linux/arm64 "$image" > "$RUNNER_TEMP/index-pull.log" 2>&1; then
+            echo '::error::Expected the classic image store to reject the second index pull'
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/index-pull.log"
+          grep -q 'cannot overwrite digest' "$RUNNER_TEMP/index-pull.log"
+      - name: Smoke-test both platform digests in the same daemon
+        env:
+          INDEX_DIGEST: ${{ steps.build.outputs.digest }}
+        run: scripts/smoke-test-release.sh localhost:5000/rust-affected "$INDEX_DIGEST"
+      - name: Remove temporary registry
+        if: always()
+        run: docker rm -f release-test-registry || true
 
   actionlint:
     name: Lint workflows
