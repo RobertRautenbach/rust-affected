@@ -61,21 +61,6 @@ pub struct AffectedResult {
     pub affected_binary_members: Vec<String>,
 }
 
-// Cargo target paths can retain `..`. Do not require files to exist or resolve symlinks.
-fn normalize_target_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    normalized
-}
-
 // Lexical normalization preserves deleted paths and does not resolve symlinks.
 fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
     let mut normalized = PathBuf::new();
@@ -184,11 +169,11 @@ pub fn compute_affected<S: BuildHasher>(
     let force_all = check_force_triggers(&normalized_files, force_triggers)?;
     let members: Vec<_> = workspace.iter_by_path().collect();
     for (dir, pkg) in &members {
-        let package_dir = workspace.root().join(dir);
-        if pkg.build_targets().any(|target| {
-            !normalize_target_path(target.path().as_std_path())
-                .starts_with(package_dir.as_std_path())
-        }) {
+        let package_dir = path_clean::clean(workspace.root().join(dir));
+        if pkg
+            .build_targets()
+            .any(|target| !path_clean::clean(target.path()).starts_with(&package_dir))
+        {
             warnings.push(Warning::ExternalTarget(pkg.name().to_string()));
         }
     }
