@@ -1,0 +1,8 @@
+[workspace]
+members = ["core", "app"]
+resolver = "2"
+exclude = ["external/core-v1"]
+
+[patch.crates-io]
+core-alias = { package = "resolution-core", path = "core" }
+core-v1 = { package = "resolution-core", path = "external/core-v1" }

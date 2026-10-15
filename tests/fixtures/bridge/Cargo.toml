@@ -1,0 +1,4 @@
+[workspace]
+members = ["core", "app", "second"]
+resolver = "2"
+exclude = ["external/bridge", "external/adapter"]

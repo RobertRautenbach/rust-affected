@@ -24,7 +24,6 @@ fn graph(name: &str) -> &'static WorkspaceGraph {
                 "--format-version",
                 "1",
                 "--all-features",
-                "--no-deps",
                 "--locked",
                 "--offline",
             ])

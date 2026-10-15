@@ -26,7 +26,6 @@ fn fixture_graph() -> &'static WorkspaceGraph {
                 "--format-version",
                 "1",
                 "--all-features",
-                "--no-deps",
                 "--locked",
                 "--offline",
             ])
