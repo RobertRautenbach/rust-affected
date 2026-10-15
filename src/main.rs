@@ -115,10 +115,12 @@ fn load_graph() -> Result<WorkspaceGraph, String> {
 fn emit_warnings(warnings: &[Warning]) -> Result<(), String> {
     let mut paths = Vec::new();
     let mut exclusions = Vec::new();
+    let mut external_targets = Vec::new();
     for warning in warnings {
         match warning {
             Warning::UnusablePath(path) => paths.push(path.as_str()),
             Warning::UnmatchedExclusion(entry) => exclusions.push(entry.as_str()),
+            Warning::ExternalTarget(member) => external_targets.push(member.as_str()),
         }
     }
     if !paths.is_empty() {
@@ -135,6 +137,14 @@ fn emit_warnings(warnings: &[Warning]) -> Result<(), String> {
             "warning",
             &format!(
                 "excluded_members entries matched no workspace member: {exclusions:?}. Names match crate names exactly; use a trailing slash such as 'tools/' to match a directory."
+            ),
+        )?;
+    }
+    if !external_targets.is_empty() {
+        annotation(
+            "warning",
+            &format!(
+                "workspace members declare targets outside their package directories: {external_targets:?}. Changes to those sources may not affect the declaring members. Configure force_triggers for shared source directories within the workspace root; sources outside that root require workflow-level invalidation."
             ),
         )?;
     }

@@ -96,6 +96,68 @@ fn missing_workspace_fails_even_without_changes() {
 }
 
 #[test]
+fn external_targets_warn_without_changing_attribution() {
+    let scratch = Scratch::workspace();
+    std::fs::create_dir(scratch.0.join("member-extra")).unwrap();
+    std::fs::write(scratch.0.join("member-extra/lib.rs"), "").unwrap();
+    std::fs::write(scratch.0.join("member-extra/main.rs"), "fn main() {}\n").unwrap();
+    let manifest = scratch.0.join("member/Cargo.toml");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    for (targets, warns) in [
+        ("[lib]\npath = \"../member/src/lib.rs\"\n", false),
+        ("[lib]\npath = \"../member-extra/lib.rs\"\n", true),
+        (
+            "[[bin]]\nname = \"external\"\npath = \"../member-extra/main.rs\"\n",
+            true,
+        ),
+        ("build = \"../member-extra/main.rs\"\n", true),
+        (
+            "[lib]\npath = \"../member-extra/lib.rs\"\n[[bin]]\nname = \"external\"\npath = \"../member-extra/main.rs\"\n",
+            true,
+        ),
+    ] {
+        std::fs::write(&manifest, format!("{original}{targets}")).unwrap();
+        for (changed, trigger, excluded) in [
+            ("member-extra/lib.rs", "", ""),
+            ("", "", ""),
+            ("member-extra/lib.rs", "member-extra/", "member"),
+        ] {
+            let output = run(
+                &scratch.0,
+                &[
+                    ("CHANGED_FILES", changed),
+                    ("FORCE_TRIGGERS", trigger),
+                    ("EXCLUDED_MEMBERS", excluded),
+                ],
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
+            assert_eq!(
+                stderr
+                    .matches("workspace members declare targets outside")
+                    .count(),
+                usize::from(warns),
+                "{stderr}"
+            );
+            if warns {
+                assert!(stderr.contains("[\"member\"]"), "{stderr}");
+                assert!(stderr.contains("Configure force_triggers"), "{stderr}");
+            }
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                result,
+                serde_json::json!({
+                    "changed_crates": [],
+                    "affected_library_members": [],
+                    "affected_binary_members": [],
+                    "force_all": !trigger.is_empty(),
+                })
+            );
+        }
+    }
+}
+
+#[test]
 fn invalid_glob_fails_even_without_changes() {
     for changed in ["lib-core/src/lib.rs", ""] {
         assert_error(

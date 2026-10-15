@@ -45,6 +45,8 @@ impl std::error::Error for Error {
 pub enum Warning {
     UnusablePath(String),
     UnmatchedExclusion(String),
+    /// A workspace member declares a target outside its package directory.
+    ExternalTarget(String),
 }
 
 /// Sorted workspace-member names and diagnostics from affected-file analysis.
@@ -57,6 +59,21 @@ pub struct AffectedResult {
     pub changed_crates: Vec<String>,
     pub affected_library_members: Vec<String>,
     pub affected_binary_members: Vec<String>,
+}
+
+// Cargo target paths can retain `..`. Do not require files to exist or resolve symlinks.
+fn normalize_target_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 // Lexical normalization preserves deleted paths and does not resolve symlinks.
@@ -166,6 +183,15 @@ pub fn compute_affected<S: BuildHasher>(
         .collect();
     let force_all = check_force_triggers(&normalized_files, force_triggers)?;
     let members: Vec<_> = workspace.iter_by_path().collect();
+    for (dir, pkg) in &members {
+        let package_dir = workspace.root().join(dir);
+        if pkg.build_targets().any(|target| {
+            !normalize_target_path(target.path().as_std_path())
+                .starts_with(package_dir.as_std_path())
+        }) {
+            warnings.push(Warning::ExternalTarget(pkg.name().to_string()));
+        }
+    }
     let mut excluded_ids = HashSet::new();
     for entry in excluded {
         let mut matched = false;
