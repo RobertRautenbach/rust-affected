@@ -7,12 +7,13 @@ use std::fmt;
 use std::hash::BuildHasher;
 use std::path::{Component, Path, PathBuf};
 
-/// A failure while validating triggers or constructing the workspace graph.
+/// A failure while validating triggers or querying the dependency graph.
 #[derive(Debug)]
 pub enum Error {
     InvalidForceTrigger(globset::Error),
+    Graph(guppy::Error),
     InvalidMetadata(serde_json::Error),
-    Graph(String),
+    IncompleteMetadata(String),
 }
 
 impl fmt::Display for Error {
@@ -21,8 +22,9 @@ impl fmt::Display for Error {
             Self::InvalidForceTrigger(error) => {
                 write!(f, "invalid force_triggers pattern: {error}")
             }
+            Self::Graph(error) => write!(f, "failed to build or query package graph: {error}"),
             Self::InvalidMetadata(error) => write!(f, "invalid cargo metadata: {error}"),
-            Self::Graph(error) => write!(f, "failed to build package graph: {error}"),
+            Self::IncompleteMetadata(error) => write!(f, "failed to build package graph: {error}"),
         }
     }
 }
@@ -31,8 +33,9 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(match self {
             Self::InvalidForceTrigger(error) => error,
+            Self::Graph(error) => error,
             Self::InvalidMetadata(error) => error,
-            Self::Graph(_) => return None,
+            Self::IncompleteMetadata(_) => return None,
         })
     }
 }
@@ -136,18 +139,20 @@ pub fn check_force_triggers(
 /// warned about and ignored, including for force triggers.
 ///
 /// # Errors
-/// Returns an error for invalid force-trigger patterns or glob-set construction.
+/// Returns an error for invalid force-trigger patterns or failed graph queries.
 pub fn compute_affected<S: BuildHasher>(
     graph: &WorkspaceGraph,
     changed_files: &[String],
     force_triggers: &[String],
     excluded: &HashSet<String, S>,
 ) -> Result<AffectedResult, Error> {
+    let graph = &graph.inner;
+    let workspace = graph.workspace();
     let mut warnings = Vec::new();
     let files: Vec<PathBuf> = changed_files
         .iter()
         .filter_map(|file| {
-            let normalized = normalize_changed_file(file, graph.root());
+            let normalized = normalize_changed_file(file, workspace.root().as_std_path());
             if normalized.is_none() {
                 warnings.push(Warning::UnusablePath(file.clone()));
             }
@@ -160,14 +165,14 @@ pub fn compute_affected<S: BuildHasher>(
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
     let force_all = check_force_triggers(&normalized_files, force_triggers)?;
-    let members = &graph.members;
+    let members: Vec<_> = workspace.iter_by_path().collect();
     let mut excluded_ids = HashSet::new();
     for entry in excluded {
         let mut matched = false;
-        for (dir, pkg) in members {
-            if exclusion_matches(entry, &pkg.name, dir) {
+        for (dir, pkg) in &members {
+            if exclusion_matches(entry, pkg.name(), dir.as_std_path()) {
                 matched = true;
-                excluded_ids.insert(dir.clone());
+                excluded_ids.insert(pkg.id().clone());
             }
         }
         if !matched {
@@ -179,19 +184,22 @@ pub fn compute_affected<S: BuildHasher>(
 
     let mut direct_ids = HashSet::new();
     for file in &files {
-        if let Some((dir, _)) = members
+        if let Some((_, pkg)) = members
             .iter()
-            .filter(|(dir, _)| file.starts_with(dir))
+            .filter(|(dir, _)| file.starts_with(dir.as_std_path()))
             .max_by_key(|(dir, _)| dir.components().count())
         {
-            direct_ids.insert(dir.clone());
+            direct_ids.insert(pkg.id().clone());
         }
     }
 
     let affected_set = if force_all {
-        members.keys().cloned().collect()
+        graph.query_workspace().resolve()
     } else {
-        graph.reverse_closure(&direct_ids)
+        graph
+            .query_reverse(direct_ids.iter())
+            .map_err(Error::Graph)?
+            .resolve()
     };
 
     let mut result = AffectedResult {
@@ -199,19 +207,22 @@ pub fn compute_affected<S: BuildHasher>(
         force_all,
         ..AffectedResult::default()
     };
-    for (directory, member) in members {
-        if !affected_set.contains(directory) || excluded_ids.contains(directory) {
+    for pkg in affected_set.packages(guppy::graph::DependencyDirection::Forward) {
+        if !pkg.in_workspace() || excluded_ids.contains(pkg.id()) {
             continue;
         }
-        if direct_ids.contains(directory) {
-            result.changed_crates.push(member.name.clone());
+        if direct_ids.contains(pkg.id()) {
+            result.changed_crates.push(pkg.name().to_string());
         }
-        let output = if member.binary {
+        let members = if pkg
+            .build_targets()
+            .any(|target| matches!(target.id(), guppy::graph::BuildTargetId::Binary(_)))
+        {
             &mut result.affected_binary_members
         } else {
             &mut result.affected_library_members
         };
-        output.push(member.name.clone());
+        members.push(pkg.name().to_string());
     }
     result.changed_crates.sort();
     result.affected_library_members.sort();

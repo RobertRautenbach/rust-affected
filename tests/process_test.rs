@@ -692,3 +692,111 @@ fn git_source_patch_uses_cargos_selected_workspace_identity() {
         serde_json::json!(["app"])
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn locate_project_failures_are_reported_before_metadata() {
+    let scratch = Scratch::new();
+    for (script, expected) in [
+        (
+            "printf '\\377'",
+            "cargo locate-project output is not valid UTF-8",
+        ),
+        (
+            "printf 'relative/Cargo.toml\\n'",
+            "no absolute workspace manifest path",
+        ),
+        ("printf '/'", "invalid workspace manifest path"),
+        ("exit 0", "no absolute workspace manifest path"),
+        (
+            "printf 'error: locate failed\\n' >&2; exit 7",
+            "cargo locate-project failed: error: locate failed",
+        ),
+    ] {
+        let executable = fake_cargo(&scratch, "");
+        std::fs::write(&executable, format!("#!/bin/sh\n[ \"$*\" = 'locate-project --workspace --message-format plain' ] || exit 9\n{script}\n")).unwrap();
+        for changed in ["", "lib-core/src/lib.rs"] {
+            let output = command(&fixture())
+                .env("CARGO", &executable)
+                .env("CHANGED_FILES", changed)
+                .output()
+                .unwrap();
+            assert_error(&output, expected);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn locked_failure_is_not_retried_and_commands_share_context() {
+    let scratch = Scratch::new();
+    let executable = fake_cargo(&scratch, "");
+    let log = scratch.0.join("commands");
+    std::fs::write(&executable, r#"#!/bin/sh
+[ "$CARGO_TERM_COLOR" = never ] && [ "$RUSTUP_TERM_COLOR" = never ] && [ "$CARGO_CACHE_RUSTC_INFO" = 0 ] || exit 8
+[ "$PWD" = "$EXPECTED_CWD" ] || exit 9
+printf '%s\n' "$*" >> "$COMMAND_LOG"
+case "$*" in
+  'locate-project --workspace --message-format plain') printf '%s\n' "$FAKE_MANIFEST" ;;
+  'metadata --format-version 1 --all-features --locked') printf 'error: locked failure\n' >&2; exit 7 ;;
+  *) exit 10 ;;
+esac
+"#).unwrap();
+    let cwd = fixture().join("lib-core");
+    let output = command(&cwd)
+        .env("CARGO", executable)
+        .env("EXPECTED_CWD", &cwd)
+        .env("COMMAND_LOG", &log)
+        .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
+        .env("CHANGED_FILES", "lib-core/src/lib.rs")
+        .output()
+        .unwrap();
+    assert_error(&output, "cargo metadata failed: error: locked failure");
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        "locate-project --workspace --message-format plain\nmetadata --format-version 1 --all-features --locked\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unresolved_metadata_fails_even_for_empty_input_and_force_all() {
+    let scratch = Scratch::new();
+    let metadata = Command::new(env!("CARGO"))
+        .current_dir(fixture())
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--all-features",
+            "--no-deps",
+            "--locked",
+            "--offline",
+        ])
+        .env("CARGO_CACHE_RUSTC_INFO", "0")
+        .output()
+        .unwrap();
+    assert!(metadata.status.success());
+    let data = scratch.0.join("metadata.json");
+    std::fs::write(&data, metadata.stdout).unwrap();
+    let executable = fake_cargo(&scratch, "cat \"$FAKE_METADATA\"");
+    for (changed, force) in [("", ""), ("Cargo.toml", "**"), ("lib-core/src/lib.rs", "")] {
+        let output_file = scratch.0.join("output");
+        let summary = scratch.0.join("summary");
+        std::fs::write(&output_file, "sentinel\n").unwrap();
+        std::fs::write(&summary, "sentinel\n").unwrap();
+        let output = command(&fixture())
+            .env("CARGO", &executable)
+            .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
+            .env("FAKE_METADATA", &data)
+            .env("CHANGED_FILES", changed)
+            .env("FORCE_TRIGGERS", force)
+            .env("GITHUB_OUTPUT", &output_file)
+            .env("GITHUB_STEP_SUMMARY", &summary)
+            .output()
+            .unwrap();
+        assert_error(&output, "cargo metadata has no resolved graph");
+        assert_eq!(std::fs::read_to_string(output_file).unwrap(), "sentinel\n");
+        assert_eq!(std::fs::read_to_string(summary).unwrap(), "sentinel\n");
+    }
+}

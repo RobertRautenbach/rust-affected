@@ -148,3 +148,15 @@ fn unresolved_or_inconsistent_metadata_is_rejected() {
         );
     }
 }
+
+#[test]
+fn guppy_construction_errors_retain_their_source() {
+    use std::error::Error;
+    let mut data = metadata("patch-selected");
+    for package in data["packages"].as_array_mut().unwrap() {
+        package["name"] = json!("duplicate-workspace-name");
+    }
+    let error = WorkspaceGraph::from_json(&data.to_string()).unwrap_err();
+    assert!(error.source().is_some(), "{error}");
+    assert!(error.to_string().contains("package graph"));
+}

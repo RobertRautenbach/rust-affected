@@ -116,24 +116,38 @@ run_failing_case() {
   rm -rf "${tmp}"
 }
 
-# Neither source can be fetched. Metadata must succeed with no network or cache.
-make_remote_dependency_fixture() {
-  REMOTE_WS="${TMP_PARENT}/remote-workspace"
-  mkdir -p "${REMOTE_WS}/consumer/src" "${REMOTE_WS}/.cargo"
-  printf '[workspace]\nmembers = ["consumer"]\nresolver = "2"\n' > "${REMOTE_WS}/Cargo.toml"
-  printf '[package]\nname = "consumer"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\ngitdep = { git = "https://example.invalid/never-fetch" }\nunavailable-registry-crate = "99"\n' \
-    > "${REMOTE_WS}/consumer/Cargo.toml"
-  : > "${REMOTE_WS}/consumer/src/lib.rs"
-  printf '[net]\ngit-fetch-with-cli = true\n' > "${REMOTE_WS}/.cargo/config.toml"
+# Builds a workspace whose only member depends on a git repository and whose
+# .cargo/config.toml sets `net.git-fetch-with-cli = true`. With that setting
+# cargo fetches git dependencies by spawning the git CLI, so the runtime image
+# has to ship git. Sets GITDEP (the dependency repository) and GITWS (the
+# workspace).
+make_git_dependency_fixture() {
+  GITDEP="$(mktemp -d "${TMP_PARENT}/rust-affected-gitdep.XXXXXX")"
+  mkdir -p "${GITDEP}/src"
+  printf '[package]\nname = "gitdep"\nversion = "0.1.0"\nedition = "2021"\n' > "${GITDEP}/Cargo.toml"
+  : > "${GITDEP}/src/lib.rs"
+  git -C "${GITDEP}" init -q
+  git -C "${GITDEP}" add -A
+  git -C "${GITDEP}" -c user.name=smoke -c user.email=smoke@example.com -c commit.gpgsign=false \
+    commit -q -m "gitdep"
+
+  GITWS="$(mktemp -d "${TMP_PARENT}/rust-affected-gitws.XXXXXX")"
+  mkdir -p "${GITWS}/consumer/src" "${GITWS}/.cargo"
+  printf '[workspace]\nmembers = ["consumer"]\nresolver = "2"\n' > "${GITWS}/Cargo.toml"
+  printf '[package]\nname = "consumer"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\ngitdep = { git = "file:///github/gitdep" }\n' \
+    > "${GITWS}/consumer/Cargo.toml"
+  : > "${GITWS}/consumer/src/lib.rs"
+  printf '[net]\ngit-fetch-with-cli = true\n' > "${GITWS}/.cargo/config.toml"
 }
 
 fixture_before="$(snapshot "${REPO_ROOT}/tests/fixtures")"
 EMPTY_WARNING='::warning::changed_files is empty; no files will be attributed. If files did change, check the step producing changed_files. Workspace and configuration validation still run.'
 
+LOCK_WARNING='::warning::No Cargo.lock in the workspace root; cargo metadata will resolve dependencies and may create one (owned by root inside the action). Commit Cargo.lock to use --locked.'
 
 # This must name an installed toolchain, not merely happen to work online.
 docker run --rm --network none --entrypoint sh "${IMAGE}" -c \
-  'test "$RUSTUP_TOOLCHAIN" = "$RUST_VERSION" && test "$RUSTUP_AUTO_INSTALL" = 0 && rustup run "$RUSTUP_TOOLCHAIN" cargo --version && ! command -v git'
+  'test "$RUSTUP_TOOLCHAIN" = "$RUST_VERSION" && test "$RUSTUP_AUTO_INSTALL" = 0 && rustup run "$RUSTUP_TOOLCHAIN" cargo --version && git --version'
 
 run_case "leaf library change" "${FIXTURE}" \
   "lib-utils/src/lib.rs" "" "" \
@@ -214,50 +228,56 @@ LOCK_WS="${TMP_PARENT}/lock-workspace"
 copy_fixture "${LOCK_WS}"
 printf 'version = 4\n' > "${LOCK_WS}/Cargo.lock"
 lock_before="$(snapshot "${LOCK_WS}")"
-run_case "stale lock from member directory" "${LOCK_WS}" "app-alpha/src/main.rs" "" "" \
-'changed_crates=["app-alpha"]
-affected_library_members=[]
-affected_binary_members=["app-alpha"]
-force_all=false' --workdir /github/workspace/app-alpha
-EXPECTED_ANNOTATIONS="${EMPTY_WARNING}" run_case "empty input with stale lock" "${LOCK_WS}" "" "" "" \
-'changed_crates=[]
-affected_library_members=[]
-affected_binary_members=[]
-force_all=false'
+run_failing_case "stale lock" "${LOCK_WS}" "lib-utils/src/lib.rs" "" "" 'lock file' --workdir /github/workspace/app-alpha
+EXPECTED_ANNOTATIONS="${EMPTY_WARNING}" run_failing_case "empty input with stale lock" "${LOCK_WS}" "" "" "" 'lock file'
 if [[ "${lock_before}" != "$(snapshot "${LOCK_WS}")" ]]; then
-  fail "stale lock cases modified the workspace"
+  fail "stale lock failures modified the workspace"
 fi
 # Use a fresh mount: Docker Desktop can retain stale stat data after host deletion.
 MISSING_LOCK_WS="${TMP_PARENT}/missing-lock-workspace"
 copy_fixture "${MISSING_LOCK_WS}"
 rm "${MISSING_LOCK_WS}/Cargo.lock"
 missing_before="$(snapshot "${MISSING_LOCK_WS}")"
-run_case "missing lock" "${MISSING_LOCK_WS}" "app-alpha/src/main.rs" "" "" \
+EXPECTED_ANNOTATIONS="${LOCK_WARNING}" run_case "missing lock" "${MISSING_LOCK_WS}" "app-alpha/src/main.rs" "" "" \
 'changed_crates=["app-alpha"]
 affected_library_members=[]
 affected_binary_members=["app-alpha"]
 force_all=false'
-EXPECTED_ANNOTATIONS="${EMPTY_WARNING}" run_case "empty input with missing lock" "${MISSING_LOCK_WS}" "" "" "" \
+[[ -f "${MISSING_LOCK_WS}/Cargo.lock" ]] || fail "missing-lock fallback did not create a lockfile"
+mv "${MISSING_LOCK_WS}/Cargo.lock" "${TMP_PARENT}/created.lock"
+[[ "${missing_before}" = "$(snapshot "${MISSING_LOCK_WS}")" ]] || fail "missing-lock fallback changed more than Cargo.lock"
+EMPTY_LOCK_WS="${TMP_PARENT}/empty-missing-lock-workspace"
+copy_fixture "${EMPTY_LOCK_WS}"
+rm "${EMPTY_LOCK_WS}/Cargo.lock"
+empty_before="$(snapshot "${EMPTY_LOCK_WS}")"
+EXPECTED_ANNOTATIONS="${EMPTY_WARNING}"$'\n'"${LOCK_WARNING}" run_case "empty input with missing lock" "${EMPTY_LOCK_WS}" "" "" "" \
 'changed_crates=[]
 affected_library_members=[]
 affected_binary_members=[]
-force_all=false'
-if [[ "${missing_before}" != "$(snapshot "${MISSING_LOCK_WS}")" ]]; then
-  fail "missing lock cases modified the workspace"
-fi
+force_all=false' --workdir /github/workspace/app-alpha
+[[ -f "${EMPTY_LOCK_WS}/Cargo.lock" ]] || fail "empty input did not create a lockfile"
+mv "${EMPTY_LOCK_WS}/Cargo.lock" "${TMP_PARENT}/empty-created.lock"
+[[ "${empty_before}" = "$(snapshot "${EMPTY_LOCK_WS}")" ]] || fail "empty fallback changed more than Cargo.lock"
 
 MALFORMED_WS="${TMP_PARENT}/malformed-lock-workspace"
 copy_fixture "${MALFORMED_WS}"
-printf 'this is not TOML\n' > "${MALFORMED_WS}/Cargo.lock"
+printf 'not TOML\n' > "${MALFORMED_WS}/Cargo.lock"
 malformed_before="$(snapshot "${MALFORMED_WS}")"
-run_case "malformed lock is ignored" "${MALFORMED_WS}" "app-alpha/src/main.rs" "" "" \
-'changed_crates=["app-alpha"]
-affected_library_members=[]
-affected_binary_members=["app-alpha"]
-force_all=false'
-if [[ "${malformed_before}" != "$(snapshot "${MALFORMED_WS}")" ]]; then
-  fail "malformed lock case modified the workspace"
-fi
+run_failing_case "malformed lock" "${MALFORMED_WS}" "app-alpha/src/main.rs" "" "" 'cargo metadata failed'
+[[ "${malformed_before}" = "$(snapshot "${MALFORMED_WS}")" ]] || fail "malformed-lock failure changed workspace"
+
+for fixture in patch-selected patch-config patch-unused bridge; do
+  binaries='["app"]'
+  case "${fixture}" in
+    patch-unused) binaries='[]' ;;
+    bridge) binaries='["app","second"]' ;;
+  esac
+  run_case "resolved ${fixture}" "${REPO_ROOT}/tests/fixtures/${fixture}" "core/src/lib.rs" "" "" \
+"changed_crates=[\"resolution-core\"]
+affected_library_members=[\"resolution-core\"]
+affected_binary_members=${binaries}
+force_all=false"
+done
 
 TOOLCHAIN_WS="${TMP_PARENT}/toolchain-workspace"
 copy_fixture "${TOOLCHAIN_WS}"
@@ -277,22 +297,20 @@ if [[ "${toolchain_before}" != "$(snapshot "${TOOLCHAIN_WS}")" ]]; then
   fail "toolchain cases modified the workspace"
 fi
 
-make_remote_dependency_fixture
-remote_before="$(snapshot "${REMOTE_WS}")"
-CACHE="${TMP_PARENT}/empty-cargo-home"
-mkdir -p "${CACHE}"
-run_case "registry and Git dependencies need no network or Git" "${REMOTE_WS}" \
+# The dependency repository is owned by the host user while the container runs
+# as root, and git refuses to serve a repository owned by someone else unless it
+# is marked safe. Consumers fetch remote repositories, so this is a test-only
+# concern; the GIT_CONFIG_* variables mark every directory safe for this run.
+make_git_dependency_fixture
+EXPECTED_ANNOTATIONS="${LOCK_WARNING}" run_case "git dependency fetched with the git CLI" "${GITWS}" \
   "consumer/src/lib.rs" "" "" \
 'changed_crates=["consumer"]
 affected_library_members=["consumer"]
 affected_binary_members=[]
-force_all=false' -v "${CACHE}:/github/cargo-home"
-if [[ -e "${CACHE}/registry" || -e "${CACHE}/git" ]]; then
-  fail "metadata populated a dependency cache"
-fi
-if [[ "${remote_before}" != "$(snapshot "${REMOTE_WS}")" ]]; then
-  fail "remote dependency case modified the workspace"
-fi
+force_all=false' \
+  -e CARGO_NET_OFFLINE=false -v "${GITDEP}:/github/gitdep:ro" \
+  -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*'
+rm -rf "${GITDEP}" "${GITWS}" || echo "warning: could not remove ${GITDEP} ${GITWS}" >&2
 
 # The container runs as root inside the mounted checkout. It must leave the
 # fixture workspace exactly as it found it: no Cargo.lock rewrite and no stray
