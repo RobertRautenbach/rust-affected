@@ -1,6 +1,7 @@
 use guppy::{CargoMetadata, MetadataCommand, graph::PackageGraph};
 use rust_affected::{AffectedResult, Warning, compute_affected};
 use std::{
+    collections::HashSet,
     env,
     fs::File,
     io::{self, Write},
@@ -40,7 +41,7 @@ fn input(name: &str) -> Result<Vec<String>, String> {
 fn run() -> Result<(), String> {
     let changed_files = input("CHANGED_FILES")?;
     let force_triggers = input("FORCE_TRIGGERS")?;
-    let excluded = input("EXCLUDED_MEMBERS")?.into_iter().collect();
+    let excluded: HashSet<String> = input("EXCLUDED_MEMBERS")?.into_iter().collect();
     if changed_files.is_empty() {
         annotation(
             "warning",
@@ -79,8 +80,7 @@ fn run_cargo(command: &mut Command, operation: &str) -> Result<Vec<u8>, String> 
             .lines()
             .find(|line| line.trim_start().starts_with("error"))
             .or_else(|| message.lines().find(|line| !line.trim().is_empty()))
-            .map(str::to_owned)
-            .unwrap_or_else(|| output.status.to_string());
+            .map_or_else(|| output.status.to_string(), str::to_owned);
         return Err(format!("cargo {operation} failed: {detail}"));
     }
     Ok(output.stdout)
@@ -171,24 +171,31 @@ fn write_destination(writer: &mut impl Write, contents: &str, name: &str) -> Res
 }
 
 fn emit_output(result: &AffectedResult) -> Result<(), String> {
-    let changed = serde_json::to_string(&result.changed_crates).map_err(|e| e.to_string())?;
-    let libraries =
-        serde_json::to_string(&result.affected_library_members).map_err(|e| e.to_string())?;
-    let binaries =
-        serde_json::to_string(&result.affected_binary_members).map_err(|e| e.to_string())?;
-    let lines = format!(
-        "changed_crates={changed}\naffected_library_members={libraries}\naffected_binary_members={binaries}\nforce_all={}\n",
-        result.force_all
-    );
-    let json = format!(
-        "{}\n",
-        serde_json::json!({
-            "changed_crates": result.changed_crates,
-            "affected_library_members": result.affected_library_members,
-            "affected_binary_members": result.affected_binary_members,
-            "force_all": result.force_all,
-        })
-    );
+    let value = serde_json::to_value(result).map_err(|error| error.to_string())?;
+    let fields = value
+        .as_object()
+        .ok_or("affected result must serialize as an object")?;
+    let mut fields: Vec<_> = fields.iter().collect();
+    // Preserve the action's historical line order while emitting every serialized field.
+    fields.sort_by_key(|(key, _)| {
+        let order = match key.as_str() {
+            "changed_crates" => 0,
+            "affected_library_members" => 1,
+            "affected_binary_members" => 2,
+            "force_all" => 3,
+            _ => 4,
+        };
+        (order, key.as_str())
+    });
+    let mut lines = String::new();
+    for (key, value) in fields {
+        lines.push_str(key);
+        lines.push('=');
+        lines.push_str(&value.to_string());
+        lines.push('\n');
+    }
+    // A JSON Value retains the existing alphabetic object-key order.
+    let json = format!("{value}\n");
     let summary = render_summary(result);
     // Opening both first avoids publishing results when a destination is invalid.
     let mut output_file = open_destination("GITHUB_OUTPUT")?;
@@ -229,7 +236,11 @@ fn render_summary(result: &AffectedResult) -> String {
             .map(|name| format!("`{name}`"))
             .collect::<Vec<_>>()
             .join(" ");
-        summary.push_str(&format!("| **{label}** | {names} |\n"));
+        summary.push_str("| **");
+        summary.push_str(label);
+        summary.push_str("** | ");
+        summary.push_str(&names);
+        summary.push_str(" |\n");
     }
     for (_, heading, names) in rows {
         let names = if names.is_empty() {
@@ -241,7 +252,11 @@ fn render_summary(result: &AffectedResult) -> String {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        summary.push_str(&format!("\n### {heading}\n{names}\n"));
+        summary.push_str("\n### ");
+        summary.push_str(heading);
+        summary.push('\n');
+        summary.push_str(&names);
+        summary.push('\n');
     }
     summary
 }

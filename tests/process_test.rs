@@ -71,7 +71,7 @@ fn run(cwd: &Path, envs: &[(&str, &str)]) -> Output {
 fn assert_error(output: &Output, message: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, Vec::<u8>::new());
     assert_eq!(
         stderr
             .lines()
@@ -454,6 +454,65 @@ fn results_are_echoed_and_summary_is_appended_in_both_modes() {
             if changed.starts_with("app-alpha") {
                 assert!(summary.contains("| **Changed** | `app-alpha` |"));
             }
+        }
+    }
+}
+
+#[test]
+fn output_bytes_match_stage_three_in_both_modes() {
+    let snapshots = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/root-package");
+    for (name, changed, trigger, excluded) in [
+        ("ordinary", "sub-lib/src/lib.rs src/main.rs", "", ""),
+        ("force", "Cargo.lock", "Cargo.lock", ""),
+        ("empty", "", "", ""),
+        ("excluded", "sub-lib/src/lib.rs", "", "sub-lib"),
+        ("warnings", "../bad%path sub-lib/src/lib.rs", "", "unknown"),
+    ] {
+        for file_output in [false, true] {
+            let scratch = Scratch::new();
+            let output_path = scratch.0.join("output");
+            let summary_path = scratch.0.join("summary");
+            std::fs::write(&output_path, "existing=value\n").unwrap();
+            std::fs::write(&summary_path, "existing summary\n").unwrap();
+            let mut cmd = command(&workspace);
+            // Keep unrelated Cargo processes from adding package-cache lock notices.
+            // This fixture has only local dependencies, so an empty cache is sufficient.
+            cmd.env("CARGO_HOME", scratch.0.join("cargo-home"));
+            cmd.env("CHANGED_FILES", changed)
+                .env("FORCE_TRIGGERS", trigger)
+                .env("EXCLUDED_MEMBERS", excluded)
+                .env("GITHUB_STEP_SUMMARY", &summary_path);
+            if file_output {
+                cmd.env("GITHUB_OUTPUT", &output_path);
+            }
+            let output = cmd.output().unwrap();
+            assert_eq!(output.status.code(), Some(0), "{name}: {output:?}");
+            let extension = if file_output { "output" } else { "json" };
+            assert_eq!(
+                output.stdout,
+                std::fs::read(snapshots.join(format!("{name}.{extension}"))).unwrap(),
+                "{name}: stdout"
+            );
+            assert_eq!(
+                output.stderr,
+                std::fs::read(snapshots.join(format!("{name}.stderr"))).unwrap(),
+                "{name}: stderr"
+            );
+            assert_eq!(
+                std::fs::read(summary_path).unwrap(),
+                std::fs::read(snapshots.join(format!("{name}.summary"))).unwrap(),
+                "{name}: summary"
+            );
+            let mut expected_file = b"existing=value\n".to_vec();
+            if file_output {
+                expected_file.extend_from_slice(&output.stdout);
+            }
+            assert_eq!(
+                std::fs::read(output_path).unwrap(),
+                expected_file,
+                "{name}: output file"
+            );
         }
     }
 }

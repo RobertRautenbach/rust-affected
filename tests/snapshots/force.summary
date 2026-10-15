@@ -1,0 +1,21 @@
+existing summary
+> [!WARNING]
+> **Force all** — a global trigger file changed, entire workspace affected.
+
+## rust-affected
+
+| | Crates |
+|---|---|
+| **Changed** | `root-app` |
+| **Affected libraries** | `independent-lib` `sub-lib` |
+| **Affected binaries** | `root-app` |
+
+### Changed crates
+- `root-app`
+
+### Affected library members
+- `independent-lib`
+- `sub-lib`
+
+### Affected binary members
+- `root-app`

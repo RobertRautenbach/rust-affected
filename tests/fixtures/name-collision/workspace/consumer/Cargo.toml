@@ -1,0 +1,8 @@
+[package]
+name = "consumer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+workspace-shared = { package = "shared", path = "../member" }
+external-shared = { package = "shared", path = "../../external" }

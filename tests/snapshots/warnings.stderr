@@ -1,0 +1,2 @@
+::warning::1 changed file(s) were ignored for attribution and force triggers: ["../bad%25path"]. Use paths relative to the workspace root or absolute paths beneath it; empty paths and '..' are not supported.
+::warning::excluded_members entries matched no workspace member: ["unknown"]. Names match crate names exactly; use a trailing slash such as 'tools/' to match a directory.

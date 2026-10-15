@@ -6,7 +6,7 @@ fn binary_path() -> PathBuf {
     // cargo test builds binaries into the same target directory
     let path = PathBuf::from(env!("CARGO_BIN_EXE_rust-affected"));
     // Ensure the binary exists (built by cargo test)
-    assert!(path.exists(), "Binary not found at {path:?}");
+    assert!(path.exists(), "Binary not found at {}", path.display());
     path
 }
 
