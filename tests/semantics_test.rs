@@ -3,11 +3,13 @@ use rust_affected::{AffectedResult, compute_affected};
 use std::{collections::HashSet, path::PathBuf, sync::OnceLock};
 
 fn graph(name: &str) -> &'static PackageGraph {
+    static EDGES: OnceLock<PackageGraph> = OnceLock::new();
     static ROOT: OnceLock<PackageGraph> = OnceLock::new();
     static NESTED: OnceLock<PackageGraph> = OnceLock::new();
     static VIRTUAL: OnceLock<PackageGraph> = OnceLock::new();
     static COLLISION: OnceLock<PackageGraph> = OnceLock::new();
     let slot = match name {
+        "edge-kinds" => &EDGES,
         "root-package" => &ROOT,
         "nested-package" => &NESTED,
         "workspace" => &VIRTUAL,
@@ -390,4 +392,27 @@ fn library_reports_invalid_globs_even_for_empty_input() {
     assert!(error.source().is_some());
     assert!(error.to_string().contains("[abc"));
     assert!(rust_affected::check_force_triggers(&[], &["[abc".into()]).is_err());
+}
+
+#[test]
+fn every_declared_local_dependency_kind_is_followed() {
+    let result = compute("edge-kinds", &["graph-core/src/lib.rs"], &[], &[]);
+    assert_lists(
+        &result,
+        &["graph-core"],
+        &["build", "dev", "graph-core", "normal", "optional", "target"],
+        &["top"],
+    );
+    let excluded = compute(
+        "edge-kinds",
+        &["graph-core/src/lib.rs"],
+        &[],
+        &["normal", "optional"],
+    );
+    assert_lists(
+        &excluded,
+        &["graph-core"],
+        &["build", "dev", "graph-core", "target"],
+        &["top"],
+    );
 }

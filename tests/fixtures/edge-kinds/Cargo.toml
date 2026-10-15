@@ -1,0 +1,6 @@
+[workspace]
+members = ["graph-core", "normal", "optional", "build", "dev", "target-specific", "top"]
+resolver="2"
+
+[workspace.dependencies]
+graph-core = { path="graph-core" }
