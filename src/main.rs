@@ -64,16 +64,7 @@ fn run_cargo(command: &mut Command, operation: &str) -> Result<Vec<u8>, String> 
     let output = command
         .output()
         .map_err(|error| format!("failed to start cargo {operation}: {error}"))?;
-    let mut stderr = io::stderr().lock();
-    stderr
-        .write_all(&output.stderr)
-        .map_err(|error| format!("failed to forward cargo stderr: {error}"))?;
-    // Keep a subsequent annotation on its own line even if Cargo omitted a newline.
-    if !output.stderr.is_empty() && !output.stderr.ends_with(b"\n") {
-        stderr
-            .write_all(b"\n")
-            .map_err(|error| format!("failed to forward cargo stderr: {error}"))?;
-    }
+    // Cargo diagnostics can contain workflow commands; emit only an escaped failure summary.
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr);
         let detail = message
