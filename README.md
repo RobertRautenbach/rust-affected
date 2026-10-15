@@ -163,7 +163,7 @@ Changed-file ownership still applies only to workspace members in the current ch
 
 The image sets `RUSTUP_TOOLCHAIN` to its installed Rust version and disables automatic installation with `RUSTUP_AUTO_INSTALL=0`. A consumer `rust-toolchain.toml` does not select or download another metadata toolchain. A step-level override of `RUSTUP_TOOLCHAIN` selects that toolchain instead; if it is unavailable, the step fails without installing it while auto-installation remains disabled. This does not change the toolchain used by other build steps.
 
-Cargo stderr is forwarded to the job log on success and failure, with terminal colors disabled. Failures produce one action-generated `::error::` annotation and exit 1. Warnings are grouped by input problem. After successful output and summary writes, the four output lines are echoed into the job log. Local runs without `GITHUB_OUTPUT` still print one JSON object. Output files are append-only; a write failure is reported, but partially written data cannot be rolled back.
+Raw Cargo stderr is not forwarded to the job log because it can contain repository-controlled text that GitHub interprets as workflow commands. Successful Cargo warnings are suppressed. Failures produce one action-generated `::error::` annotation with a concise, escaped error summary and exit 1; run the failing Cargo command directly when full diagnostics are needed. The action's own warnings are grouped by input problem. After successful output and summary writes, the four output lines are echoed into the job log. Local runs without `GITHUB_OUTPUT` still print one JSON object. Output files are append-only; a write failure is reported, but partially written data cannot be rolled back.
 
 ## Migrating from v4.2.0
 

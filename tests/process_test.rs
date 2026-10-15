@@ -253,7 +253,7 @@ fn valid_locks_are_preserved_without_a_missing_lock_warning() {
 }
 
 #[test]
-fn cargo_errors_are_forwarded_without_color_and_outputs_are_untouched() {
+fn cargo_errors_are_summarized_without_color_and_outputs_are_untouched() {
     let scratch = Scratch::new();
     let output_path = scratch.0.join("output");
     let summary_path = scratch.0.join("summary");
@@ -269,13 +269,87 @@ fn cargo_errors_are_forwarded_without_color_and_outputs_are_untouched() {
         .unwrap();
     assert_error(&output, "could not find");
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(!output.stderr.contains(&0x1b));
+    assert_eq!(std::fs::read_to_string(output_path).unwrap(), "sentinel\n");
+    assert_eq!(std::fs::read_to_string(summary_path).unwrap(), "sentinel\n");
+}
+
+#[test]
+fn cargo_config_warning_commands_are_not_forwarded() {
+    let scratch = Scratch::workspace();
+    std::fs::write(
+        scratch.0.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"member\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(scratch.0.join(".cargo")).unwrap();
+    std::fs::write(
+        scratch.0.join(".cargo/config.toml"),
+        "[build]\n\"unused\\n::add-mask::member\\n##[warning]legacy-injection\\n::stop-commands::attacker\\nunused\" = true\n",
+    )
+    .unwrap();
+    let output_path = scratch.0.join("output");
+    let summary_path = scratch.0.join("summary");
+    std::fs::write(&output_path, "").unwrap();
+    std::fs::write(&summary_path, "").unwrap();
+    let output = command(&scratch.0)
+        .env("CHANGED_FILES", "member/src/lib.rs")
+        .env("EXCLUDED_MEMBERS", "unknown")
+        .env("GITHUB_OUTPUT", &output_path)
+        .env("GITHUB_STEP_SUMMARY", &summary_path)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
     assert!(
-        stderr
-            .lines()
-            .any(|line| line.starts_with("error: could not find")),
+        stderr.starts_with("::warning::excluded_members entries matched no workspace member:"),
         "{stderr}"
     );
-    assert!(!output.stderr.contains(&0x1b));
+    assert_eq!(
+        output.stdout,
+        b"changed_crates=[\"member\"]\naffected_library_members=[\"member\"]\naffected_binary_members=[]\nforce_all=false\n"
+    );
+    assert_eq!(std::fs::read(output_path).unwrap(), output.stdout);
+    assert!(
+        std::fs::read_to_string(summary_path)
+            .unwrap()
+            .contains("| **Affected libraries** | `member` |")
+    );
+}
+
+#[test]
+fn cargo_failure_diagnostic_commands_are_not_forwarded() {
+    let scratch = Scratch::workspace();
+    std::fs::write(
+        scratch.0.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"member\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let manifest = scratch.0.join("member/Cargo.toml");
+    let contents = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        manifest,
+        format!(
+            "{contents}\n[dependencies]\nmissing = {{ path = \"missing\\n::add-mask::member\\n##[warning]legacy-injection\\n::error::spoof\" }}\n"
+        ),
+    )
+    .unwrap();
+    let output_path = scratch.0.join("output");
+    let summary_path = scratch.0.join("summary");
+    std::fs::write(&output_path, "sentinel\n").unwrap();
+    std::fs::write(&summary_path, "sentinel\n").unwrap();
+    let output = command(&scratch.0)
+        .env("CHANGED_FILES", "member/src/lib.rs")
+        .env("GITHUB_OUTPUT", &output_path)
+        .env("GITHUB_STEP_SUMMARY", &summary_path)
+        .output()
+        .unwrap();
+    assert_error(&output, "cargo metadata failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("failed to load manifest"), "{stderr}");
     assert_eq!(std::fs::read_to_string(output_path).unwrap(), "sentinel\n");
     assert_eq!(std::fs::read_to_string(summary_path).unwrap(), "sentinel\n");
 }
@@ -337,7 +411,7 @@ fn malformed_metadata_and_failed_cargo_have_context() {
 
 #[cfg(unix)]
 #[test]
-fn successful_cargo_stderr_is_forwarded_and_graph_errors_are_handled() {
+fn successful_cargo_stderr_is_suppressed_and_graph_errors_are_handled() {
     let scratch = Scratch::new();
     let metadata = Command::new(env!("CARGO"))
         .args([
@@ -359,7 +433,7 @@ fn successful_cargo_stderr_is_forwarded_and_graph_errors_are_handled() {
         r#"
 [ "$CARGO_TERM_COLOR" = never ] && [ "$RUSTUP_TERM_COLOR" = never ] && [ "$CARGO_CACHE_RUSTC_INFO" = 0 ] || exit 8
 [ "$*" = 'metadata --format-version 1 --all-features --locked' ] || exit 9
-printf 'cargo notice: retained\n' >&2
+printf 'cargo notice: suppressed\n' >&2
 printf 'prelude before JSON\n'
 cat "$FAKE_METADATA"
 "#,
@@ -379,17 +453,14 @@ cat "$FAKE_METADATA"
             .env("RUSTUP_TERM_COLOR", "always")
             .output()
             .unwrap();
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .lines()
-                .any(|line| line == "cargo notice: retained")
-        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("cargo notice: suppressed"));
         if valid_graph {
             assert!(
                 output.status.success(),
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            assert!(output.stderr.is_empty());
             let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(json["changed_crates"], serde_json::json!(["lib-core"]));
         } else {
