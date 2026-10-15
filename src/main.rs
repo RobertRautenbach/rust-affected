@@ -1,11 +1,9 @@
-use guppy::{CargoMetadata, MetadataCommand, graph::PackageGraph};
-use rust_affected::{AffectedResult, Warning, compute_affected};
+use rust_affected::{AffectedResult, Warning, WorkspaceGraph, compute_affected};
 use std::{
     collections::HashSet,
     env,
     fs::File,
     io::{self, Write},
-    path::Path,
     process::Command,
 };
 
@@ -86,42 +84,22 @@ fn run_cargo(command: &mut Command, operation: &str) -> Result<Vec<u8>, String> 
     Ok(output.stdout)
 }
 
-fn load_graph() -> Result<PackageGraph, String> {
-    let mut metadata = MetadataCommand::new();
-    // Discover the lock next to the workspace manifest, even when run in a member.
-    let mut locate = Command::new(metadata.cargo_command().get_program());
-    locate.args(["locate-project", "--workspace", "--message-format", "plain"]);
-    let manifest = String::from_utf8(run_cargo(&mut locate, "locate-project")?)
-        .map_err(|_| "cargo locate-project output is not valid UTF-8".to_string())?;
-    let manifest = Path::new(manifest.trim_end_matches(['\r', '\n']));
-    if !manifest.is_absolute() {
-        return Err("cargo locate-project returned no absolute workspace manifest path".into());
-    }
-    let root = manifest
-        .parent()
-        .ok_or("cargo locate-project returned an invalid workspace manifest path")?;
-    if root
-        .join("Cargo.lock")
-        .try_exists()
-        .map_err(|error| format!("failed to inspect workspace Cargo.lock: {error}"))?
-    {
-        metadata.other_options(["--locked"]);
-    } else {
-        annotation(
-            "warning",
-            "No Cargo.lock in the workspace root; cargo metadata will resolve dependencies and may create one (owned by root inside the action). Commit Cargo.lock to use --locked.",
-        )?;
-    }
-    let stdout = String::from_utf8(run_cargo(&mut metadata.cargo_command(), "metadata")?)
+fn load_graph() -> Result<WorkspaceGraph, String> {
+    let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    command.args([
+        "metadata",
+        "--format-version",
+        "1",
+        "--all-features",
+        "--no-deps",
+    ]);
+    let stdout = String::from_utf8(run_cargo(&mut command, "metadata")?)
         .map_err(|_| "cargo metadata output is not valid UTF-8".to_string())?;
     let json = stdout
         .lines()
         .find(|line| line.starts_with('{'))
         .ok_or("cargo metadata returned no JSON")?;
-    CargoMetadata::parse_json(json)
-        .map_err(|error| format!("invalid cargo metadata: {error}"))?
-        .build_graph()
-        .map_err(|error| format!("failed to build package graph: {error}"))
+    WorkspaceGraph::from_json(json).map_err(|error| error.to_string())
 }
 
 fn emit_warnings(warnings: &[Warning]) -> Result<(), String> {

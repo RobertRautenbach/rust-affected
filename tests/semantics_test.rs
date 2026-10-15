@@ -1,13 +1,16 @@
-use guppy::{MetadataCommand, graph::PackageGraph};
+use rust_affected::WorkspaceGraph;
 use rust_affected::{AffectedResult, compute_affected};
+use std::process::Command;
 use std::{collections::HashSet, path::PathBuf, sync::OnceLock};
 
-fn graph(name: &str) -> &'static PackageGraph {
-    static ROOT: OnceLock<PackageGraph> = OnceLock::new();
-    static NESTED: OnceLock<PackageGraph> = OnceLock::new();
-    static VIRTUAL: OnceLock<PackageGraph> = OnceLock::new();
-    static COLLISION: OnceLock<PackageGraph> = OnceLock::new();
+fn graph(name: &str) -> &'static WorkspaceGraph {
+    static EDGES: OnceLock<WorkspaceGraph> = OnceLock::new();
+    static ROOT: OnceLock<WorkspaceGraph> = OnceLock::new();
+    static NESTED: OnceLock<WorkspaceGraph> = OnceLock::new();
+    static VIRTUAL: OnceLock<WorkspaceGraph> = OnceLock::new();
+    static COLLISION: OnceLock<WorkspaceGraph> = OnceLock::new();
     let slot = match name {
+        "edge-kinds" => &EDGES,
         "root-package" => &ROOT,
         "nested-package" => &NESTED,
         "workspace" => &VIRTUAL,
@@ -15,15 +18,26 @@ fn graph(name: &str) -> &'static PackageGraph {
         _ => panic!("unknown fixture"),
     };
     slot.get_or_init(|| {
-        MetadataCommand::new()
+        let output = Command::new(env!("CARGO"))
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--all-features",
+                "--no-deps",
+                "--locked",
+                "--offline",
+            ])
+            .env("CARGO_CACHE_RUSTC_INFO", "0")
             .current_dir(
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("tests/fixtures")
                     .join(name),
             )
-            .other_options(["--locked"])
-            .build_graph()
-            .unwrap()
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        WorkspaceGraph::from_json(std::str::from_utf8(&output.stdout).unwrap()).unwrap()
     })
 }
 
@@ -248,16 +262,13 @@ fn exclusions_never_reassign_ownership_or_prune_traversal() {
 
 #[test]
 fn equivalent_paths_produce_identical_results() {
-    let absolute = graph("workspace")
-        .workspace()
-        .root()
-        .join("lib-core/src/lib.rs");
+    let absolute = graph("workspace").root().join("lib-core/src/lib.rs");
     let expected = compute("workspace", &["lib-core/src/lib.rs"], &[], &[]);
     for file in [
         "./lib-core/src/lib.rs",
         "././lib-core/src/lib.rs",
         "lib-core//src/./lib.rs",
-        absolute.as_str(),
+        absolute.to_str().unwrap(),
     ] {
         assert_eq!(compute("workspace", &[file], &[], &[]), expected, "{file}");
     }
@@ -277,11 +288,11 @@ fn invalid_paths_cannot_own_files_or_force_the_workspace() {
 
 #[test]
 fn normalized_paths_and_patterns_activate_force_triggers() {
-    let absolute = graph("workspace").workspace().root().join("Cargo.lock");
+    let absolute = graph("workspace").root().join("Cargo.lock");
     for (file, trigger) in [
         ("./Cargo.lock", "Cargo.lock"),
         ("Cargo.lock", "././Cargo.lock"),
-        (absolute.as_str(), "Cargo.lock"),
+        (absolute.to_str().unwrap(), "Cargo.lock"),
         ("./infra/deploy.yml", "././infra/"),
     ] {
         assert!(compute("workspace", &[file], &[trigger], &[]).force_all);
@@ -390,4 +401,27 @@ fn library_reports_invalid_globs_even_for_empty_input() {
     assert!(error.source().is_some());
     assert!(error.to_string().contains("[abc"));
     assert!(rust_affected::check_force_triggers(&[], &["[abc".into()]).is_err());
+}
+
+#[test]
+fn every_declared_local_dependency_kind_is_followed() {
+    let result = compute("edge-kinds", &["graph-core/src/lib.rs"], &[], &[]);
+    assert_lists(
+        &result,
+        &["graph-core"],
+        &["build", "dev", "graph-core", "normal", "optional", "target"],
+        &["top"],
+    );
+    let excluded = compute(
+        "edge-kinds",
+        &["graph-core/src/lib.rs"],
+        &[],
+        &["normal", "optional"],
+    );
+    assert_lists(
+        &excluded,
+        &["graph-core"],
+        &["build", "dev", "graph-core", "target"],
+        &["top"],
+    );
 }

@@ -1,0 +1,7 @@
+[package]
+name="optional"
+version="0.1.0"
+edition="2021"
+
+[dependencies]
+renamed = { package="graph-core", path="../graph-core", optional=true }
