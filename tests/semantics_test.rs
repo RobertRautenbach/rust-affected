@@ -336,6 +336,35 @@ fn exclusions_are_normalized_component_prefixes() {
 }
 
 #[test]
+fn directory_force_triggers_match_the_directory_and_descendants_only() {
+    for trigger in ["infra/", "./infra/", "././infra/"] {
+        for file in [
+            "infra",
+            "infra/",
+            "./infra",
+            "infra/deploy.yml",
+            "infra/nested/deploy.yml",
+        ] {
+            let result = compute("workspace", &[file], &[trigger], &["app-alpha"]);
+            assert!(result.force_all, "{file} with {trigger}");
+            assert_eq!(result.changed_crates, Vec::<String>::new());
+            assert_eq!(result.affected_binary_members, ["app-beta", "tool-alpha"]);
+        }
+        for file in [
+            "infra-extra",
+            "infra-extra/deploy.yml",
+            "other/infra",
+            "other/infra/deploy.yml",
+        ] {
+            assert!(
+                !compute("workspace", &[file], &[trigger], &[]).force_all,
+                "{file} with {trigger}"
+            );
+        }
+    }
+}
+
+#[test]
 fn deleted_files_renames_and_duplicates_are_lexical() {
     assert_lists(
         &compute(

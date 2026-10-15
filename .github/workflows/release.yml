@@ -220,6 +220,14 @@ jobs:
           echo "IMAGE_DIGEST=${BUILD_DIGEST}" >> "$GITHUB_ENV"
           echo "Pushed ${IMAGE}:${NEW_TAG}@${BUILD_DIGEST}"
 
+      - name: Smoke-test the release digest on both architectures
+        run: |
+          set -euo pipefail
+          for ARCH in amd64 arm64; do
+            docker pull --platform "linux/${ARCH}" "${IMAGE}@${IMAGE_DIGEST}"
+            DOCKER_DEFAULT_PLATFORM="linux/${ARCH}" scripts/smoke-test.sh "${IMAGE}@${IMAGE_DIGEST}"
+          done
+
       - name: Pin action.yml to the new image, update README, push release commit and version tag
         run: |
           set -euo pipefail
@@ -233,7 +241,7 @@ jobs:
           [[ "$(grep -c '^  image: ' action.yml)" == 1 ]] \
             || { echo "::error::Expected exactly one image: line in action.yml."; exit 1; }
 
-          # README.md: only full vMAJOR.MINOR.PATCH references are bumped; "@v3" in the migration example is untouched.
+          # README.md: bump full vMAJOR.MINOR.PATCH action references.
           sed -E -i "s|(${OWNER}/${PACKAGE}@)v[0-9]+\.[0-9]+\.[0-9]+|\1${NEW_TAG}|g" README.md
           if grep -nE "${OWNER}/${PACKAGE}@v[0-9]+\.[0-9]+\.[0-9]+" README.md | grep -vF "@${NEW_TAG}"; then
             echo "::error::README.md still contains stale full-version references."
