@@ -45,6 +45,8 @@ impl std::error::Error for Error {
 pub enum Warning {
     UnusablePath(String),
     UnmatchedExclusion(String),
+    /// A workspace member declares a target outside its package directory.
+    ExternalTarget(String),
 }
 
 /// Sorted workspace-member names and diagnostics from affected-file analysis.
@@ -166,6 +168,15 @@ pub fn compute_affected<S: BuildHasher>(
         .collect();
     let force_all = check_force_triggers(&normalized_files, force_triggers)?;
     let members: Vec<_> = workspace.iter_by_path().collect();
+    for (dir, pkg) in &members {
+        let package_dir = path_clean::clean(workspace.root().join(dir));
+        if pkg
+            .build_targets()
+            .any(|target| !path_clean::clean(target.path()).starts_with(&package_dir))
+        {
+            warnings.push(Warning::ExternalTarget(pkg.name().to_string()));
+        }
+    }
     let mut excluded_ids = HashSet::new();
     for entry in excluded {
         let mut matched = false;

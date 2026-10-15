@@ -142,6 +142,8 @@ Inputs are split on whitespace, so filenames containing spaces, tabs, or newline
 
 Empty input produces a warning and empty results after validating the workspace and configuration. Exclusions matching no member also produce warnings: `tools` is a crate name, while `tools/` is a directory prefix. Invalid UTF-8 inputs, invalid globs, Cargo failures, and output-writing failures exit 1 with an `::error::` annotation. Warnings and errors are written to stderr.
 
+Members declaring a target outside their package directory (for example, `[lib] path = "../shared/lib.rs"`) produce a warning, including with empty input or exclusions. Detection uses Cargo's declared target paths and lexical normalization; it does not resolve symlinks or discover modules, `include!()` files, or arbitrary build-script inputs. Attribution and affected lists are unchanged. Configure a force trigger such as `shared/` for shared sources within the workspace root. Sources outside that root require invalidation in the calling workflow.
+
 ## Outputs
 
 | Output | Description |
