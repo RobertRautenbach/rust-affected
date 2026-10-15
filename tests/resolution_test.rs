@@ -82,8 +82,8 @@ fn cargo_selected_identities_control_affected_members() {
             &HashSet::from(["resolution-core".into()]),
         )
         .unwrap();
-        assert!(excluded.changed_crates.is_empty());
-        assert!(excluded.affected_library_members.is_empty());
+        assert_eq!(excluded.changed_crates, Vec::<String>::new());
+        assert_eq!(excluded.affected_library_members, Vec::<String>::new());
         assert_eq!(excluded.affected_binary_members, binaries, "{layout}");
         // Each independent binary is also a change origin: traversal must not run forwards.
         for binary in if layout == "bridge" {
@@ -100,7 +100,7 @@ fn cargo_selected_identities_control_affected_members() {
             .unwrap();
             assert_eq!(result.changed_crates, [binary]);
             assert_eq!(result.affected_binary_members, [binary]);
-            assert!(result.affected_library_members.is_empty());
+            assert_eq!(result.affected_library_members, Vec::<String>::new());
         }
         let forced = compute_affected(
             &graph,

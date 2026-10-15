@@ -153,15 +153,29 @@ Empty input produces a warning and empty results after validating the workspace 
 
 ## Inside the container
 
-The action runs `cargo metadata --format-version 1 --all-features --no-deps`. Cargo reads workspace manifests without resolving or fetching dependency sources, so registry and Git dependencies need no cache, credentials, or network access. The runtime image no longer installs Git.
+The action runs `cargo metadata --format-version 1 --all-features` and uses Guppy to query Cargo's resolved dependency graph. Cargo may download registry and Git dependencies, so a cold cache may require network access and any credentials those sources need. Git is installed in the runtime image, including support for `net.git-fetch-with-cli = true`.
 
-`Cargo.lock` is not inspected or modified: stale or malformed locks do not fail the action, and missing locks are not created or warned about. This also applies to empty input and runs from a member directory. A changed `Cargo.lock` can still activate a configured force trigger. Compiler-version caching remains disabled during Cargo inspection so existing `target/.rustc_info.json` files are preserved.
+The action discovers the workspace root before inspecting `Cargo.lock`, including when invoked from a member directory. An existing lock enables `--locked`: stale or malformed locks fail instead of being rewritten, and failures are never retried unlocked. This protects dependency resolution and the existing lockfile; it does not prohibit downloads. If the lock is absent, the action warns and resolves without `--locked`, which may create a root-owned `Cargo.lock`, even with empty input. Compiler-version caching remains disabled so existing `target/.rustc_info.json` files are preserved.
 
-The graph follows declared `path` dependencies whose manifest directories belong to workspace members. Normal, build, dev, optional, renamed, inherited, and target-specific path dependencies are included, regardless of the active host target or default features. Traversal is cycle-safe, and exclusions do not prune it. Registry/Git dependencies, including registry dependencies redirected by patches, and paths through non-workspace packages are not resolved into member edges. Configure a force trigger for changes that should invalidate the whole workspace in those layouts.
+Cargo determines which package identities and dependency edges are present, including selected registry/Git patches and patches supplied through Cargo configuration. A patch declaration alone does not imply an edge: Cargo's actual version and source selection controls the result. The graph includes all resolved normal, build, and dev edges, with all workspace features enabled and no host-platform filter. Traversal can pass through non-workspace packages; only workspace members appear in the outputs, and exclusions never prune traversal. Unresolved or structurally inconsistent metadata is an error, not a partial result.
+
+Changed-file ownership still applies only to workspace members in the current checkout. Restoring external dependency traversal does not automatically attribute changes to non-member source directories or reconstruct removed members and historical dependency relationships. Configure force triggers for workspace configuration, external source directories, and other shared inputs that should invalidate the entire workspace. Arbitrary inputs read by build scripts cannot be inferred from Cargo's dependency graph.
 
 The image sets `RUSTUP_TOOLCHAIN` to its installed Rust version and disables automatic installation with `RUSTUP_AUTO_INSTALL=0`. A consumer `rust-toolchain.toml` does not select or download another metadata toolchain. A step-level override of `RUSTUP_TOOLCHAIN` selects that toolchain instead; if it is unavailable, the step fails without installing it while auto-installation remains disabled. This does not change the toolchain used by other build steps.
 
 Cargo stderr is forwarded to the job log on success and failure, with terminal colors disabled. Failures produce one action-generated `::error::` annotation and exit 1. Warnings are grouped by input problem. After successful output and summary writes, the four output lines are echoed into the job log. Local runs without `GITHUB_OUTPUT` still print one JSON object. Output files are append-only; a write failure is reported, but partially written data cannot be rolled back.
+
+## Migrating from v4.2.0
+
+v4.2.0's member-only graph could miss affected dependents reached through selected patches or non-workspace packages. The restored Cargo-resolved graph includes those dependents. Output names and formatting are unchanged, but the affected lists can grow for these layouts.
+
+Dependency fetching and Git support return. Existing lockfiles must be valid and current; missing lockfiles produce a warning and may be created, including during empty-input runs. Ensure private dependency credentials are available and commit a current lockfile to protect dependency selection.
+
+## Changes to dependency analysis
+
+Correctness takes priority over inspection speed. Graph changes require a written behavioral contract, regression fixtures for Cargo's resolution decisions, and an explanation of every differential mismatch. Passing many changed-file combinations within one layout does not establish equivalence across dependency layouts.
+
+Run the committed snapshots and resolution tests, then compare a baseline and candidate binary with `scripts/differential-test.sh BASELINE CANDIDATE`. The harness covers the original 60 runs plus patch, external-bridge, and dependency-kind cases, comparing exit status, stdout, stderr, action outputs, and summaries. Tests also assert expected affected sets and Cargo's selected package identities independently of the differential comparison. Use an installed Rust toolchain; all fixture dependencies are local.
 
 ## Migrating from v3
 
