@@ -1,39 +1,45 @@
 # rust-affected
 
-A GitHub Action that detects which packages in a Rust workspace are affected by a set of changed files, using the Cargo dependency graph.
+Find which Rust packages need testing after a change.
 
-Given a set of changed files, it determines:
-- **`changed_crates`** — packages with files directly modified
-- **`affected_library_members`** — pure library crates that are changed or (transitively) depend on a changed crate; binary crates are excluded from this list
-- **`affected_binary_members`** — affected crates that have a binary target; mutually exclusive with `affected_library_members`
-- **`force_all`** — whether a configured force-trigger file changed, meaning the entire workspace should be considered affected
+If a shared library changes, this action selects that library and any packages that depend on it. Your workflow can then skip tests for unaffected packages.
 
-## Usage
+You provide the changed files. The action returns package names.
+
+## Quick start
+
+Add this workflow to `.github/workflows/test.yml`. It tests each affected package in a separate job.
+
+The example requires a committed `Cargo.lock` and the Rust toolchain your project needs on the runners.
 
 ```yaml
+name: Test affected packages
+
+on:
+  pull_request:
+
 permissions:
   contents: read
 
 jobs:
-  plan:
+  affected:
     runs-on: ubuntu-latest
     outputs:
-      affected_binary_members: ${{ steps.affected.outputs.affected_binary_members }}
+      libraries: ${{ steps.affected.outputs.affected_library_members }}
+      binaries: ${{ steps.affected.outputs.affected_binary_members }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Get changed files
+      - uses: tj-actions/changed-files@v47
         id: changed
-        uses: tj-actions/changed-files@v47
         with:
           quotepath: false
           output_renamed_files_as_deleted_and_added: true
 
-      - name: Detect affected packages
+      - uses: robertrautenbach/rust-affected@v4.3.1
         id: affected
-        uses: robertrautenbach/rust-affected@v4.3.1
         with:
           changed_files: ${{ steps.changed.outputs.all_modified_files }}
           force_triggers: |
@@ -43,142 +49,96 @@ jobs:
             .cargo/config.toml
             .github/
 
-  deploy:
-    needs: plan
-    if: contains(fromJSON(needs.plan.outputs.affected_binary_members), 'my-service')
+  test-libraries:
+    needs: affected
+    if: needs.affected.outputs.libraries != '[]'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.affected.outputs.libraries) }}
     steps:
-      - run: echo "Deploying my-service"
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - env:
+          PACKAGE: ${{ matrix.package }}
+        run: cargo test --locked -p "$PACKAGE"
+
+  test-binaries:
+    needs: affected
+    if: needs.affected.outputs.binaries != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.affected.outputs.binaries) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - env:
+          PACKAGE: ${{ matrix.package }}
+        run: cargo test --locked -p "$PACKAGE"
 ```
 
-The deployment condition checks membership in the parsed JSON array, so `my-service-worker` does not match `my-service`. Force triggers already populate the affected lists while respecting `excluded_members`; no separate `force_all` condition is needed.
+Empty lists skip their test jobs. Packages with both a library and a binary appear only in the binary list, where both are tested.
 
-## Example output
+> **Safety:** The action runs Cargo, which can execute repository-configured programs. For untrusted pull requests, use `pull_request` with read-only permissions and no secrets, as shown above. Do not run untrusted PR code in privileged `pull_request_target` or `workflow_run` jobs.
 
-Imagine a workspace where `lib-utils` is a shared library depended on by `lib-core`, `lib-core-ext`, `app-alpha`, `app-beta`, and `tool-alpha`. A PR that changes `lib-utils/src/lib.rs` produces:
+## Configure shared files
 
-```
-changed_crates=["lib-utils"]
-affected_library_members=["lib-core","lib-core-ext","lib-utils"]
-affected_binary_members=["app-alpha","app-beta","tool-alpha"]
-force_all=false
-```
-
-The action logs the four output lines and writes a job summary to the workflow run:
-
-> ## rust-affected
->
-> | | Crates |
-> |---|---|
-> | **Changed** | `lib-utils` |
-> | **Affected libraries** | `lib-core` `lib-core-ext` `lib-utils` |
-> | **Affected binaries** | `app-alpha` `app-beta` `tool-alpha` |
->
-> ### Changed crates
-> - `lib-utils`
->
-> ### Affected library members
-> - `lib-core`
-> - `lib-core-ext`
-> - `lib-utils`
->
-> ### Affected binary members
-> - `app-alpha`
-> - `app-beta`
-> - `tool-alpha`
-
-## Getting changed files
-
-You provide the list of changed files — here are common approaches:
-
-### tj-actions/changed-files
+Some changes should test everything. Add those files or directories to `force_triggers`:
 
 ```yaml
-- name: Get changed files
-  id: changed
-  uses: tj-actions/changed-files@v47
-  with:
-    quotepath: false
-    output_renamed_files_as_deleted_and_added: true
-
-- uses: robertrautenbach/rust-affected@v4.3.1
-  with:
-    changed_files: ${{ steps.changed.outputs.all_modified_files }}
+force_triggers: |
+  Cargo.lock
+  Cargo.toml
+  shared/
+  **/*.sql
 ```
 
-Use `all_modified_files` because `all_changed_files` omits deletions. The rename option includes both the old and new paths, so moving a file between crates marks both. `quotepath: false` preserves non-ASCII filenames.
+`shared/` matches everything inside that directory. `**/*.sql` matches SQL files anywhere in the workspace.
 
-### git diff (no extra dependencies)
+**There are no default triggers.** Adapt the quick-start list to include shared configuration, sources, and other files your builds read.
+
+To leave packages out of the results:
 
 ```yaml
-- name: Get changed files
-  id: changed
-  env:
-    BASE_SHA: ${{ github.event.pull_request.base.sha }}
-  shell: bash
-  run: |
-    set -euo pipefail
-    files="$(git -c core.quotepath=false diff --no-renames --name-only "$BASE_SHA"..HEAD | tr '\n' ' ')"
-    printf 'files=%s\n' "$files" >> "$GITHUB_OUTPUT"
-
-- uses: robertrautenbach/rust-affected@v4.3.1
-  with:
-    changed_files: ${{ steps.changed.outputs.files }}
+excluded_members: |
+  internal-helper
+  tools/
 ```
 
-> **Note:** Requires `fetch-depth: 0` on `actions/checkout` so the base SHA is available locally.
+This excludes the package named `internal-helper` and packages under `tools/`. Other packages that depend on them can still be selected.
 
-## Inputs
+## Inputs and outputs
 
-| Input | Required | Description |
-|---|---|---|
-| `changed_files` | **Yes** | Space- or newline-separated list of changed paths, including deletions and both paths of renames. Relative paths, leading `./`, and absolute paths beneath the workspace root are accepted. |
-| `force_triggers` | No | Space- or newline-separated list of glob patterns that trigger a full rebuild when any matching file changes. Supports `*`, `**`, and `?`. A bare name (e.g. `Cargo.lock`) matches that exact path only. A trailing slash (e.g. `.github/`) matches the directory and everything inside it. Full globs are also supported (e.g. `**/*.sql`, `migrations/**`). If omitted, `force_all` is never set. |
-| `excluded_members` | No | Space- or newline-separated list of workspace member names **or path prefixes** to exclude from all outputs. A plain name (e.g. `my-tool`) matches the crate name directly. An entry containing `/` is matched against the crate's directory relative to the workspace root: a trailing slash (e.g. `tools/`) excludes every crate under that directory, while a relative path (e.g. `tools/my-tool`) excludes that crate and members nested beneath it, but not `tools/my-tool-extra`. Leading `./` and redundant separators are accepted in path prefixes. Useful for internal tooling or helper crates that should never appear in CI results. If omitted, no members are excluded. |
+Input lists accept spaces or newlines between entries.
 
-## How files map to crates
+| Input | Description |
+|---|---|
+| `changed_files` | **Required.** Changed paths relative to the workspace root. |
+| `force_triggers` | Paths or patterns that select all non-excluded packages. |
+| `excluded_members` | Package names or directory paths to omit. |
 
-Each valid changed path belongs to the workspace member with the deepest matching directory. A file in `parent/nested/` belongs to that member, not also to `parent/`. Dependents are then found through the workspace path-dependency graph, including through excluded members. Exclusions filter results without transferring ownership to another member.
-
-If the workspace root is a package, it owns paths outside other members, including root documentation and configuration. This is conservative directory attribution; it does not apply `cargo package` inclusion rules. In a virtual workspace, paths outside members have no owner unless they match a force trigger. Configure shared manifests and configuration as force triggers when they should affect the entire workspace.
-
-Paths are normalized lexically: `./lib/src/lib.rs`, `lib//src/lib.rs`, and an absolute path beneath the workspace root are equivalent. Files need not exist, so deletions work. Symlinks are not resolved. Empty paths, root-only paths, any `..` component, and foreign absolute paths are warned about and ignored for both attribution and force triggers. Inside the Docker action, workspace-absolute paths start with `/github/workspace`; host paths such as `/home/runner/work/...` are outside that root.
-
-Inputs are split on whitespace, so filenames containing spaces, tabs, or newlines are unsupported. Supply unquoted paths, including deleted files and both ends of renames. Removed workspace members cannot be reconstructed from current metadata.
-
-Empty input produces a warning and empty results after validating the workspace and configuration. Exclusions matching no member also produce warnings: `tools` is a crate name, while `tools/` is a directory prefix. Invalid UTF-8 inputs, invalid globs, Cargo failures, and output-writing failures exit 1 with an `::error::` annotation. Warnings and errors are written to stderr.
-
-Members declaring a target outside their package directory (for example, `[lib] path = "../shared/lib.rs"`) produce a warning, including with empty input or exclusions. Detection uses Cargo's declared target paths and lexical normalization; it does not resolve symlinks or discover modules, `include!()` files, or arbitrary build-script inputs. Attribution and affected lists are unchanged. Configure a force trigger such as `shared/` for shared sources within the workspace root. Sources outside that root require invalidation in the calling workflow.
-
-## Outputs
+The action returns these outputs and adds a summary to the workflow run:
 
 | Output | Description |
 |---|---|
-| `changed_crates` | JSON array of crate names with directly changed files |
-| `affected_library_members` | JSON array of affected workspace members that are pure library crates (no binary target) |
-| `affected_binary_members` | JSON array of affected workspace members that have a binary target; mutually exclusive with `affected_library_members` |
-| `force_all` | `"true"` if a force-trigger file changed, otherwise `"false"` |
+| `changed_crates` | Packages whose own files changed. |
+| `affected_library_members` | Affected packages without a binary target. |
+| `affected_binary_members` | Affected packages with a binary target. |
+| `force_all` | `"true"` when a force trigger matched; otherwise `"false"`. |
 
-## Inside the container
+Package lists are JSON arrays, such as `["shared-lib","api-server"]`. Use `fromJSON(...)` to read them in a workflow.
 
-**Trust boundary:** this action runs Cargo against the checkout, and metadata analysis can execute repository-configured programs such as compiler wrappers. Treat it as execution of repository code. Analyze untrusted pull requests in an unprivileged `pull_request` job with read-only permissions and no secrets; do not check out an untrusted PR head in a privileged `pull_request_target` or `workflow_run` job to run this action. Escaping Cargo diagnostics protects the job log, but does not sandbox Cargo or its subprocesses. See [GitHub’s guidance on untrusted checkouts](https://docs.github.com/en/actions/reference/security/secure-use#mitigating-the-risks-of-untrusted-code-checkout).
+## Things to know
 
-The action runs `cargo metadata --format-version 1 --all-features` and uses Guppy to query Cargo's resolved dependency graph. Cargo may download registry and Git dependencies, so a cold cache may require network access and any credentials those sources need. Git is installed in the runtime image, including support for `net.git-fetch-with-cli = true`.
+- **Include deleted and renamed files.** The quick-start example handles both. Filenames containing whitespace are unsupported.
+- **Empty input does not test everything.** It produces a warning and empty results after validation.
+- **Shared files need care.** Detection uses package directories and current Cargo dependencies. It cannot discover every build-script input or reconstruct removed packages. Use force triggers for shared inputs inside the workspace; handle outside files in your workflow.
+- **Runner requirement:** Run the detection job on Linux, such as `ubuntu-latest`. Separate build and test jobs can use any operating system and their own Rust toolchain.
+- **Cargo may download dependencies.** An outdated lockfile fails the action. A missing lockfile may be created.
 
-The action discovers the workspace root before inspecting `Cargo.lock`, including when invoked from a member directory. An existing lock enables `--locked`: stale or malformed locks fail instead of being rewritten, and failures are never retried unlocked. This protects dependency resolution and the existing lockfile; it does not prohibit downloads. If the lock is absent, the action warns and resolves without `--locked`, which may create a root-owned `Cargo.lock`, even with empty input. Compiler-version caching remains disabled so existing `target/.rustc_info.json` files are preserved.
-
-Cargo determines which package identities and dependency edges are present, including selected registry/Git patches and patches supplied through Cargo configuration. A patch declaration alone does not imply an edge: Cargo's actual version and source selection controls the result. The graph includes all resolved normal, build, and dev edges, with all workspace features enabled and no host-platform filter. Traversal can pass through non-workspace packages; only workspace members appear in the outputs, and exclusions never prune traversal. Unresolved or structurally inconsistent metadata is an error, not a partial result.
-
-Changed-file ownership still applies only to workspace members in the current checkout. Traversal through external dependencies does not automatically attribute changes to non-member source directories or reconstruct removed members and historical dependency relationships. Configure force triggers for workspace configuration, external source directories, and other shared inputs that should invalidate the entire workspace. Arbitrary inputs read by build scripts cannot be inferred from Cargo's dependency graph.
-
-The image sets `RUSTUP_TOOLCHAIN` to its installed Rust version and disables automatic installation with `RUSTUP_AUTO_INSTALL=0`. A consumer `rust-toolchain.toml` does not select or download another metadata toolchain. A step-level override of `RUSTUP_TOOLCHAIN` selects that toolchain instead; if it is unavailable, the step fails without installing it while auto-installation remains disabled. This does not change the toolchain used by other build steps.
-
-Raw Cargo stderr is not forwarded to the job log because it can contain repository-controlled text that GitHub interprets as workflow commands. Successful Cargo warnings are suppressed. Failures produce one action-generated `::error::` annotation with a concise, escaped error summary and exit 1; run the failing Cargo command directly when full diagnostics are needed. The action's own warnings are grouped by input problem. After successful output and summary writes, the four output lines are echoed into the job log. Local runs without `GITHUB_OUTPUT` still print one JSON object. Output files are append-only; a write failure is reported, but partially written data cannot be rolled back.
-
-## Development and validation
-
-Metadata validation delegates Cargo's schema to `cargo_metadata` and missing workspace-member or dependency-package references to Guppy. Local checks require format version 1, explicit resolved dependency lists, a complete graph with unique identities, a valid resolution root, and agreement between the two dependency identity lists. Malformed or incomplete metadata remains an error before outputs are written; diagnostics for delegated failures use Guppy's wording. These checks validate structure, not whether the caller enabled all features or avoided platform filtering.
-
-Correctness takes priority over inspection speed. Graph changes require a written behavioral contract, regression fixtures for Cargo's resolution decisions, and an explanation of every differential mismatch. Passing many changed-file combinations within one layout does not establish equivalence across dependency layouts.
-
-Run the committed snapshots and resolution tests, then compare a baseline and candidate binary with `scripts/differential-test.sh BASELINE CANDIDATE`. The harness covers workspace, patch, external-bridge, and dependency-kind cases, comparing exit status, stdout, stderr, action outputs, and summaries. Tests also assert expected affected sets and Cargo's selected package identities independently of the differential comparison. Use an installed Rust toolchain; all fixture dependencies are local.
+Invalid configuration or Cargo failures fail the action rather than return partial results.
