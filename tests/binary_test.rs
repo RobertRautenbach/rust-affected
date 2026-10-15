@@ -225,7 +225,8 @@ fn env_excluded_members_unset_means_no_exclusions() {
 
 #[test]
 fn env_github_output_writes_to_file() {
-    let tmp = std::env::temp_dir().join(format!("test-github-output-{}", std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let tmp = dir.path().join("output");
     // Create the file
     std::fs::write(&tmp, "").unwrap();
 
@@ -247,14 +248,12 @@ fn env_github_output_writes_to_file() {
             assert_eq!(parsed, vec!["app-alpha"]);
         }
     }
-
-    std::fs::remove_file(&tmp).ok();
 }
 
 #[test]
 fn env_github_output_appends_to_existing_content() {
-    let tmp =
-        std::env::temp_dir().join(format!("test-github-output-append-{}", std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let tmp = dir.path().join("output");
     std::fs::write(&tmp, "existing_key=existing_value\n").unwrap();
 
     let (_stdout, ok) = run_binary(&[
@@ -268,8 +267,6 @@ fn env_github_output_appends_to_existing_content() {
     assert!(contents.starts_with("existing_key=existing_value\n"));
     // New content appended
     assert!(contents.contains("changed_crates="));
-
-    std::fs::remove_file(&tmp).ok();
 }
 
 // ── JSON stdout output (no GITHUB_OUTPUT) ───────────────────────────
