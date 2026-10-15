@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1.98.1-slim-bookworm AS chef
+FROM --platform=$BUILDPLATFORM rust:1.99.0-slim-bookworm AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
       musl-tools \
       gcc-aarch64-linux-gnu \
@@ -38,7 +38,7 @@ RUN TARGET="$(cat /rust-target)" && \
 # cargo fetches git dependencies by spawning the git CLI (the smoke test covers
 # that configuration). This RUN executes on the target platform, so the release
 # build needs QEMU for the arm64 image.
-FROM rust:1.98.1-alpine3.23
+FROM rust:1.99.0-alpine3.23
 # Use the installed toolchain even when the checkout contains rust-toolchain.toml.
 # Derive the pin from the base image so dependency updates keep it in sync.
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION} RUSTUP_AUTO_INSTALL=0
