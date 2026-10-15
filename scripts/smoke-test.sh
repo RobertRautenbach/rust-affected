@@ -163,6 +163,13 @@ affected_library_members=["lib-core","lib-core-ext","lib-standalone","lib-utils"
 affected_binary_members=["app-alpha","app-beta","tool-alpha"]
 force_all=true'
 
+run_case "directory-only force trigger" "${FIXTURE}" \
+  "infra/" "infra/" "" \
+'changed_crates=[]
+affected_library_members=["lib-core","lib-core-ext","lib-standalone","lib-utils","lib-with-tests"]
+affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+force_all=true'
+
 run_case "path-prefix exclusion" "${FIXTURE}" \
   "lib-utils/src/lib.rs" "" "tools/" \
 'changed_crates=["lib-utils"]

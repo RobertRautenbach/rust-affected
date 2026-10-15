@@ -11,14 +11,18 @@ Given a set of changed files, it determines:
 ## Usage
 
 ```yaml
+permissions:
+  contents: read
+
 jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
       affected_binary_members: ${{ steps.affected.outputs.affected_binary_members }}
-      force_all: ${{ steps.affected.outputs.force_all }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Get changed files
         id: changed
@@ -41,11 +45,13 @@ jobs:
 
   deploy:
     needs: plan
-    if: contains(needs.plan.outputs.affected_binary_members, 'my-service') || needs.plan.outputs.force_all == 'true'
+    if: contains(fromJSON(needs.plan.outputs.affected_binary_members), 'my-service')
     runs-on: ubuntu-latest
     steps:
       - run: echo "Deploying my-service"
 ```
+
+The deployment condition checks membership in the parsed JSON array, so `my-service-worker` does not match `my-service`. Force triggers already populate the affected lists while respecting `excluded_members`; no separate `force_all` condition is needed.
 
 ## Example output
 
@@ -155,57 +161,24 @@ Members declaring a target outside their package directory (for example, `[lib] 
 
 ## Inside the container
 
+**Trust boundary:** this action runs Cargo against the checkout, and metadata analysis can execute repository-configured programs such as compiler wrappers. Treat it as execution of repository code. Analyze untrusted pull requests in an unprivileged `pull_request` job with read-only permissions and no secrets; do not check out an untrusted PR head in a privileged `pull_request_target` or `workflow_run` job to run this action. Escaping Cargo diagnostics protects the job log, but does not sandbox Cargo or its subprocesses. See [GitHub’s guidance on untrusted checkouts](https://docs.github.com/en/actions/reference/security/secure-use#mitigating-the-risks-of-untrusted-code-checkout).
+
 The action runs `cargo metadata --format-version 1 --all-features` and uses Guppy to query Cargo's resolved dependency graph. Cargo may download registry and Git dependencies, so a cold cache may require network access and any credentials those sources need. Git is installed in the runtime image, including support for `net.git-fetch-with-cli = true`.
 
 The action discovers the workspace root before inspecting `Cargo.lock`, including when invoked from a member directory. An existing lock enables `--locked`: stale or malformed locks fail instead of being rewritten, and failures are never retried unlocked. This protects dependency resolution and the existing lockfile; it does not prohibit downloads. If the lock is absent, the action warns and resolves without `--locked`, which may create a root-owned `Cargo.lock`, even with empty input. Compiler-version caching remains disabled so existing `target/.rustc_info.json` files are preserved.
 
 Cargo determines which package identities and dependency edges are present, including selected registry/Git patches and patches supplied through Cargo configuration. A patch declaration alone does not imply an edge: Cargo's actual version and source selection controls the result. The graph includes all resolved normal, build, and dev edges, with all workspace features enabled and no host-platform filter. Traversal can pass through non-workspace packages; only workspace members appear in the outputs, and exclusions never prune traversal. Unresolved or structurally inconsistent metadata is an error, not a partial result.
 
-Changed-file ownership still applies only to workspace members in the current checkout. Restoring external dependency traversal does not automatically attribute changes to non-member source directories or reconstruct removed members and historical dependency relationships. Configure force triggers for workspace configuration, external source directories, and other shared inputs that should invalidate the entire workspace. Arbitrary inputs read by build scripts cannot be inferred from Cargo's dependency graph.
+Changed-file ownership still applies only to workspace members in the current checkout. Traversal through external dependencies does not automatically attribute changes to non-member source directories or reconstruct removed members and historical dependency relationships. Configure force triggers for workspace configuration, external source directories, and other shared inputs that should invalidate the entire workspace. Arbitrary inputs read by build scripts cannot be inferred from Cargo's dependency graph.
 
 The image sets `RUSTUP_TOOLCHAIN` to its installed Rust version and disables automatic installation with `RUSTUP_AUTO_INSTALL=0`. A consumer `rust-toolchain.toml` does not select or download another metadata toolchain. A step-level override of `RUSTUP_TOOLCHAIN` selects that toolchain instead; if it is unavailable, the step fails without installing it while auto-installation remains disabled. This does not change the toolchain used by other build steps.
 
 Raw Cargo stderr is not forwarded to the job log because it can contain repository-controlled text that GitHub interprets as workflow commands. Successful Cargo warnings are suppressed. Failures produce one action-generated `::error::` annotation with a concise, escaped error summary and exit 1; run the failing Cargo command directly when full diagnostics are needed. The action's own warnings are grouped by input problem. After successful output and summary writes, the four output lines are echoed into the job log. Local runs without `GITHUB_OUTPUT` still print one JSON object. Output files are append-only; a write failure is reported, but partially written data cannot be rolled back.
 
-## Migrating from v4.2.0
-
-v4.2.0's member-only graph could miss affected dependents reached through selected patches or non-workspace packages. The restored Cargo-resolved graph includes those dependents. Output names and formatting are unchanged, but the affected lists can grow for these layouts.
-
-Dependency fetching and Git support return. Existing lockfiles must be valid and current; missing lockfiles produce a warning and may be created, including during empty-input runs. Ensure private dependency credentials are available and commit a current lockfile to protect dependency selection.
-
-## Changes to dependency analysis
+## Development and validation
 
 Metadata validation delegates Cargo's schema to `cargo_metadata` and missing workspace-member or dependency-package references to Guppy. Local checks require format version 1, explicit resolved dependency lists, a complete graph with unique identities, a valid resolution root, and agreement between the two dependency identity lists. Malformed or incomplete metadata remains an error before outputs are written; diagnostics for delegated failures use Guppy's wording. These checks validate structure, not whether the caller enabled all features or avoided platform filtering.
 
 Correctness takes priority over inspection speed. Graph changes require a written behavioral contract, regression fixtures for Cargo's resolution decisions, and an explanation of every differential mismatch. Passing many changed-file combinations within one layout does not establish equivalence across dependency layouts.
 
-Run the committed snapshots and resolution tests, then compare a baseline and candidate binary with `scripts/differential-test.sh BASELINE CANDIDATE`. The harness covers the original 60 runs plus patch, external-bridge, and dependency-kind cases, comparing exit status, stdout, stderr, action outputs, and summaries. Tests also assert expected affected sets and Cargo's selected package identities independently of the differential comparison. Use an installed Rust toolchain; all fixture dependencies are local.
-
-## Migrating from v3
-
-v4 is a breaking change. The action no longer detects changed files itself — you provide them via the `changed_files` input.
-
-| v3 | v4 |
-|---|---|
-| `base_sha` input (optional) | Removed — compute your own diff |
-| Changed files detected automatically | `changed_files` input (**required**) |
-| All outputs | Unchanged |
-
-**Before (v3):**
-```yaml
-- uses: robertrautenbach/rust-affected@v3
-```
-
-**After (v4):**
-```yaml
-- name: Get changed files
-  id: changed
-  uses: tj-actions/changed-files@v47
-  with:
-    quotepath: false
-    output_renamed_files_as_deleted_and_added: true
-
-- uses: robertrautenbach/rust-affected@v4.3.1
-  with:
-    changed_files: ${{ steps.changed.outputs.all_modified_files }}
-```
+Run the committed snapshots and resolution tests, then compare a baseline and candidate binary with `scripts/differential-test.sh BASELINE CANDIDATE`. The harness covers workspace, patch, external-bridge, and dependency-kind cases, comparing exit status, stdout, stderr, action outputs, and summaries. Tests also assert expected affected sets and Cargo's selected package identities independently of the differential comparison. Use an installed Rust toolchain; all fixture dependencies are local.

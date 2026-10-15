@@ -110,6 +110,8 @@ pub fn check_force_triggers(
     for trigger in force_triggers {
         let trigger = trigger.trim_start_matches("./");
         let pattern = if trigger.ends_with('/') {
+            builder
+                .add(Glob::new(trigger.trim_end_matches('/')).map_err(Error::InvalidForceTrigger)?);
             format!("{trigger}**")
         } else {
             trigger.to_string()
