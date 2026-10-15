@@ -22,40 +22,6 @@ pub struct WorkspaceGraph {
     pub(crate) inner: PackageGraph,
 }
 
-// Guppy deliberately supports metadata without resolution. That mode is unsafe
-// for affected-package queries, so validate identities before handing it to Guppy.
-// These fields check structure only: Cargo remains the sole dependency resolver.
-#[derive(Deserialize)]
-struct Metadata {
-    version: u32,
-    workspace_members: Vec<String>,
-    packages: Vec<Identity>,
-    resolve: Option<Resolve>,
-}
-
-#[derive(Deserialize)]
-struct Identity {
-    id: String,
-}
-
-#[derive(Deserialize)]
-struct Resolve {
-    nodes: Vec<Node>,
-    root: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct Node {
-    id: String,
-    dependencies: Vec<String>,
-    deps: Vec<Dependency>,
-}
-
-#[derive(Deserialize)]
-struct Dependency {
-    pkg: String,
-}
-
 impl WorkspaceGraph {
     /// Read Cargo's version 1 metadata with a complete resolved graph.
     /// Metadata must be produced with `--all-features` and without `--no-deps`
@@ -65,18 +31,37 @@ impl WorkspaceGraph {
     /// Returns an error for invalid JSON, unsupported metadata versions, missing
     /// resolution, inconsistent identities, or Guppy graph-construction errors.
     pub fn from_json(json: &str) -> Result<Self, Error> {
-        let metadata: Metadata = serde_json::from_str(json).map_err(Error::InvalidMetadata)?;
-        if metadata.version != 1 {
-            return Err(Error::IncompleteMetadata(format!(
-                "unsupported metadata version {}",
-                metadata.version
-            )));
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(Error::InvalidMetadata)?;
+        // cargo_metadata keeps version private and defaults missing node.deps to empty.
+        // Preserve our stricter input contract before delegating schema parsing.
+        if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err(Error::IncompleteMetadata(
+                "unsupported or missing metadata version; expected 1".into(),
+            ));
         }
+        if value
+            .pointer("/resolve/nodes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|nodes| {
+                nodes
+                    .iter()
+                    .any(|node| node.is_object() && node.get("deps").is_none())
+            })
+        {
+            return Err(Error::IncompleteMetadata(
+                "resolved node is missing deps".into(),
+            ));
+        }
+        let metadata: cargo_metadata::Metadata =
+            serde_json::from_value(value).map_err(Error::InvalidMetadata)?;
         let resolve = metadata.resolve.ok_or_else(|| {
             Error::IncompleteMetadata(
                 "cargo metadata has no resolved graph; --no-deps is not supported".into(),
             )
         })?;
+        // Guppy permits unresolved metadata and collapses some duplicate identities.
+        // Retain completeness checks; Guppy validates member and dependency references.
         let packages: HashSet<_> = metadata.packages.iter().map(|p| &p.id).collect();
         let nodes: HashSet<_> = resolve.nodes.iter().map(|n| &n.id).collect();
         let members: HashSet<_> = metadata.workspace_members.iter().collect();
@@ -84,7 +69,6 @@ impl WorkspaceGraph {
             || nodes.len() != resolve.nodes.len()
             || members.len() != metadata.workspace_members.len()
             || packages != nodes
-            || !members.is_subset(&nodes)
             || resolve.root.as_ref().is_some_and(|id| !nodes.contains(id))
         {
             return Err(Error::IncompleteMetadata(
@@ -92,10 +76,8 @@ impl WorkspaceGraph {
             ));
         }
         for node in &resolve.nodes {
-            if node.dependencies.iter().any(|id| !nodes.contains(id))
-                || node.deps.iter().any(|dep| !nodes.contains(&dep.pkg))
-                || node.dependencies.iter().collect::<HashSet<_>>()
-                    != node.deps.iter().map(|dep| &dep.pkg).collect()
+            if node.dependencies.iter().collect::<HashSet<_>>()
+                != node.deps.iter().map(|dep| &dep.pkg).collect()
             {
                 return Err(Error::IncompleteMetadata(format!(
                     "inconsistent resolved dependencies for {}",

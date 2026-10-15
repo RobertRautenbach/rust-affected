@@ -125,26 +125,81 @@ fn cargo_selected_identities_control_affected_members() {
 #[test]
 fn unresolved_or_inconsistent_metadata_is_rejected() {
     let valid = metadata("patch-selected");
-    for mutation in 0..7 {
+    for mutation in [
+        "missing resolve",
+        "null resolve",
+        "empty nodes",
+        "missing nodes",
+        "duplicate node",
+        "duplicate package",
+        "duplicate member",
+        "unknown node",
+        "invalid root",
+        "inconsistent dependencies",
+        "missing deps",
+        "null deps",
+        "unsupported version",
+        "missing version",
+        "invalid version",
+        "missing dependencies",
+    ] {
         let mut data = valid.clone();
         match mutation {
-            0 => {
+            "missing resolve" => {
                 data.as_object_mut().unwrap().remove("resolve");
             }
-            1 => data["resolve"] = Value::Null,
-            2 => data["resolve"]["nodes"] = json!([]),
-            3 => data["resolve"]["nodes"][0]["deps"][0]["pkg"] = json!("missing-id"),
-            4 => data["version"] = json!(2),
-            5 => {
+            "null resolve" => data["resolve"] = Value::Null,
+            "empty nodes" => data["resolve"]["nodes"] = json!([]),
+            "missing nodes" => {
+                data["resolve"].as_object_mut().unwrap().remove("nodes");
+            }
+            "duplicate node" => {
                 let node = data["resolve"]["nodes"][0].clone();
                 data["resolve"]["nodes"].as_array_mut().unwrap().push(node);
             }
-            6 => data["resolve"]["nodes"][0]["id"] = json!("missing-id"),
+            "duplicate package" => {
+                let package = data["packages"][0].clone();
+                data["packages"].as_array_mut().unwrap().push(package);
+            }
+            "duplicate member" => {
+                let member = data["workspace_members"][0].clone();
+                data["workspace_members"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(member);
+            }
+            "unknown node" => data["resolve"]["nodes"][0]["id"] = json!("missing-id"),
+            "invalid root" => data["resolve"]["root"] = json!("missing-id"),
+            "inconsistent dependencies" => {
+                data["resolve"]["nodes"][0]["deps"][0]["pkg"] = json!("missing-id");
+            }
+            "missing deps" => {
+                // Use a leaf: missing deps must not silently default to an empty list.
+                let leaf = data["resolve"]["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|node| node["dependencies"].as_array().unwrap().is_empty())
+                    .unwrap();
+                leaf.as_object_mut().unwrap().remove("deps");
+            }
+            "null deps" => data["resolve"]["nodes"][0]["deps"] = Value::Null,
+            "unsupported version" => data["version"] = json!(2),
+            "missing version" => {
+                data.as_object_mut().unwrap().remove("version");
+            }
+            "invalid version" => data["version"] = json!("1"),
+            "missing dependencies" => {
+                data["resolve"]["nodes"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("dependencies");
+            }
             _ => unreachable!(),
         }
         assert!(
             WorkspaceGraph::from_json(&data.to_string()).is_err(),
-            "accepted mutation {mutation}"
+            "accepted {mutation}"
         );
     }
 }
@@ -159,4 +214,40 @@ fn guppy_construction_errors_retain_their_source() {
     let error = WorkspaceGraph::from_json(&data.to_string()).unwrap_err();
     assert!(error.source().is_some(), "{error}");
     assert!(error.to_string().contains("package graph"));
+}
+
+#[test]
+fn guppy_rejects_unknown_members_and_dependency_packages() {
+    use std::error::Error as _;
+    for unknown_member in [true, false] {
+        let mut data = metadata("patch-selected");
+        if unknown_member {
+            data["workspace_members"][0] = json!("missing-id");
+        } else {
+            let node = &mut data["resolve"]["nodes"][0];
+            node["dependencies"][0] = json!("missing-id");
+            node["deps"][0]["pkg"] = json!("missing-id");
+        }
+        let error = WorkspaceGraph::from_json(&data.to_string()).unwrap_err();
+        assert!(matches!(error, rust_affected::Error::Graph(_)), "{error}");
+        assert!(error.source().is_some());
+        let error = guppy::graph::PackageGraph::from_json(data.to_string()).unwrap_err();
+        assert!(
+            matches!(error, guppy::Error::PackageGraphConstructError(_)),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn empty_dependency_arrays_are_valid() {
+    let data = metadata("patch-selected");
+    assert!(
+        data["resolve"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| { node["dependencies"] == json!([]) && node["deps"] == json!([]) })
+    );
+    WorkspaceGraph::from_json(&data.to_string()).unwrap();
 }

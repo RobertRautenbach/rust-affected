@@ -175,6 +175,8 @@ Dependency fetching and Git support return. Existing lockfiles must be valid and
 
 ## Changes to dependency analysis
 
+Metadata validation delegates Cargo's schema to `cargo_metadata` and missing workspace-member or dependency-package references to Guppy. Local checks require format version 1, explicit resolved dependency lists, a complete graph with unique identities, a valid resolution root, and agreement between the two dependency identity lists. Malformed or incomplete metadata remains an error before outputs are written; diagnostics for delegated failures use Guppy's wording. These checks validate structure, not whether the caller enabled all features or avoided platform filtering.
+
 Correctness takes priority over inspection speed. Graph changes require a written behavioral contract, regression fixtures for Cargo's resolution decisions, and an explanation of every differential mismatch. Passing many changed-file combinations within one layout does not establish equivalence across dependency layouts.
 
 Run the committed snapshots and resolution tests, then compare a baseline and candidate binary with `scripts/differential-test.sh BASELINE CANDIDATE`. The harness covers the original 60 runs plus patch, external-bridge, and dependency-kind cases, comparing exit status, stdout, stderr, action outputs, and summaries. Tests also assert expected affected sets and Cargo's selected package identities independently of the differential comparison. Use an installed Rust toolchain; all fixture dependencies are local.
