@@ -113,6 +113,26 @@ fn exclusion_matches(entry: &str, name: &str, directory: &Path) -> bool {
     }
 }
 
+/// A force-trigger pattern in the normalized form changed files are compared in.
+///
+/// "infra//" would otherwise never fire, and nothing would say so. A pattern no
+/// relative path can match is an error for the same reason.
+fn normalize_trigger(trigger: &str) -> Result<String, Error> {
+    let unmatchable = || Error::UnmatchableForceTrigger(trigger.to_owned());
+    let mut parts = Vec::new();
+    for part in trigger.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => return Err(unmatchable()),
+            _ => parts.push(part),
+        }
+    }
+    if trigger.starts_with('/') || parts.is_empty() {
+        return Err(unmatchable());
+    }
+    Ok(parts.join("/"))
+}
+
 /// Match normalized workspace-relative paths against force-trigger globs.
 ///
 /// Patterns are normalized like paths: `./` and repeated separators are dropped.
@@ -130,21 +150,7 @@ pub fn check_force_triggers(
 
     let mut builder = GlobSetBuilder::new();
     for trigger in force_triggers {
-        // Changed files are compared in normalized form, so patterns must be too:
-        // "infra//" would otherwise never fire, and nothing would say so.
-        let unmatchable = || Error::UnmatchableForceTrigger(trigger.clone());
-        let mut parts = Vec::new();
-        for part in trigger.split('/') {
-            match part {
-                "" | "." => {}
-                ".." => return Err(unmatchable()),
-                _ => parts.push(part),
-            }
-        }
-        if trigger.starts_with('/') || parts.is_empty() {
-            return Err(unmatchable());
-        }
-        let pattern = parts.join("/");
+        let pattern = normalize_trigger(trigger)?;
         if trigger.ends_with('/') {
             builder.add(Glob::new(&format!("{pattern}/**")).map_err(Error::InvalidForceTrigger)?);
         }
@@ -152,6 +158,78 @@ pub fn check_force_triggers(
     }
     let globset = builder.build().map_err(Error::InvalidForceTrigger)?;
     Ok(changed_files.iter().any(|f| globset.is_match(f)))
+}
+
+/// The changed files that can be attributed, warning about the rest.
+fn usable_files(
+    changed_files: &[String],
+    graph: &guppy::graph::PackageGraph,
+    warnings: &mut Vec<Warning>,
+) -> Vec<PathBuf> {
+    let root = graph.workspace().root().as_std_path();
+    changed_files
+        .iter()
+        .filter_map(|file| {
+            let normalized = normalize_changed_file(file, root);
+            if normalized.is_none() {
+                warnings.push(Warning::UnusablePath(file.clone()));
+            }
+            normalized
+        })
+        .collect()
+}
+
+/// Warn about members whose targets live outside their package directory.
+fn warn_about_external_targets(graph: &guppy::graph::PackageGraph, warnings: &mut Vec<Warning>) {
+    let workspace = graph.workspace();
+    for (dir, pkg) in workspace.iter_by_path() {
+        let package_dir = path_clean::clean(workspace.root().join(dir));
+        if pkg
+            .build_targets()
+            .any(|target| !path_clean::clean(target.path()).starts_with(&package_dir))
+        {
+            warnings.push(Warning::ExternalTarget(pkg.name().to_string()));
+        }
+    }
+}
+
+/// The members matched by the exclusions, warning about entries that match none.
+fn excluded_members<S: BuildHasher>(
+    graph: &guppy::graph::PackageGraph,
+    excluded: &HashSet<String, S>,
+    warnings: &mut Vec<Warning>,
+) -> HashSet<guppy::PackageId> {
+    let mut excluded_ids = HashSet::new();
+    for entry in excluded {
+        // Collected per entry: an entry matching only already-excluded members still matched.
+        let matched: Vec<_> = graph
+            .workspace()
+            .iter_by_path()
+            .filter(|(dir, pkg)| exclusion_matches(entry, pkg.name(), dir.as_std_path()))
+            .map(|(_, pkg)| pkg.id().clone())
+            .collect();
+        if matched.is_empty() {
+            warnings.push(Warning::UnmatchedExclusion(entry.clone()));
+        }
+        excluded_ids.extend(matched);
+    }
+    excluded_ids
+}
+
+/// Add an affected member to the lists it belongs in.
+fn report(pkg: &guppy::graph::PackageMetadata<'_>, changed: bool, result: &mut AffectedResult) {
+    let name = pkg.name().to_string();
+    if changed {
+        result.changed_crates.push(name.clone());
+    }
+    if pkg
+        .build_targets()
+        .any(|target| matches!(target.id(), guppy::graph::BuildTargetId::Binary(_)))
+    {
+        result.affected_binary_members.push(name);
+    } else {
+        result.affected_library_members.push(name);
+    }
 }
 
 /// The packages owning `files`, warning about workspace-wide files nobody covers.
@@ -227,48 +305,16 @@ pub fn compute_affected<S: BuildHasher>(
     excluded: &HashSet<String, S>,
 ) -> Result<AffectedResult, Error> {
     let graph = &graph.inner;
-    let workspace = graph.workspace();
     let mut warnings = Vec::new();
-    let files: Vec<PathBuf> = changed_files
-        .iter()
-        .filter_map(|file| {
-            let normalized = normalize_changed_file(file, workspace.root().as_std_path());
-            if normalized.is_none() {
-                warnings.push(Warning::UnusablePath(file.clone()));
-            }
-            normalized
-        })
-        .collect();
+    let files = usable_files(changed_files, graph, &mut warnings);
     // Input strings and workspace paths are UTF-8; normalization only removes components.
     let normalized_files: Vec<String> = files
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
     let force_all = check_force_triggers(&normalized_files, force_triggers)?;
-    let members: Vec<_> = workspace.iter_by_path().collect();
-    for (dir, pkg) in &members {
-        let package_dir = path_clean::clean(workspace.root().join(dir));
-        if pkg
-            .build_targets()
-            .any(|target| !path_clean::clean(target.path()).starts_with(&package_dir))
-        {
-            warnings.push(Warning::ExternalTarget(pkg.name().to_string()));
-        }
-    }
-    let mut excluded_ids = HashSet::new();
-    for entry in excluded {
-        let mut matched = false;
-        for (dir, pkg) in &members {
-            if exclusion_matches(entry, pkg.name(), dir.as_std_path()) {
-                matched = true;
-                excluded_ids.insert(pkg.id().clone());
-            }
-        }
-        if !matched {
-            warnings.push(Warning::UnmatchedExclusion(entry.clone()));
-        }
-    }
-
+    warn_about_external_targets(graph, &mut warnings);
+    let excluded_ids = excluded_members(graph, excluded, &mut warnings);
     let direct_ids = direct_owners(graph, &files, force_all, &mut warnings);
     warnings.sort();
     warnings.dedup();
@@ -288,21 +334,9 @@ pub fn compute_affected<S: BuildHasher>(
         ..AffectedResult::default()
     };
     for pkg in affected_set.packages(guppy::graph::DependencyDirection::Forward) {
-        if !pkg.in_workspace() || excluded_ids.contains(pkg.id()) {
-            continue;
+        if pkg.in_workspace() && !excluded_ids.contains(pkg.id()) {
+            report(&pkg, direct_ids.contains(pkg.id()), &mut result);
         }
-        if direct_ids.contains(pkg.id()) {
-            result.changed_crates.push(pkg.name().to_string());
-        }
-        let members = if pkg
-            .build_targets()
-            .any(|target| matches!(target.id(), guppy::graph::BuildTargetId::Binary(_)))
-        {
-            &mut result.affected_binary_members
-        } else {
-            &mut result.affected_library_members
-        };
-        members.push(pkg.name().to_string());
     }
     result.changed_crates.sort();
     result.affected_library_members.sort();
