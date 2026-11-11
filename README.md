@@ -35,13 +35,16 @@ jobs:
       - uses: tj-actions/changed-files@v47
         id: changed
         with:
+          json: true
+          escape_json: false
+          safe_output: false
           quotepath: false
           output_renamed_files_as_deleted_and_added: true
 
       - uses: robertrautenbach/rust-affected@v4.4.0
         id: affected
         with:
-          changed_files: ${{ steps.changed.outputs.all_modified_files }}
+          changed_files_json: ${{ steps.changed.outputs.all_modified_files }}
           force_triggers: |
             Cargo.lock
             Cargo.toml
@@ -88,6 +91,25 @@ Empty lists skip their test jobs. Packages with both a library and a binary appe
 >
 > Set `ignore_cargo_config: true` to stop Cargo reading the repository's `.cargo/config.toml` and `rust-toolchain.toml`, which is how a pull request makes it run programs. `[patch]` entries, vendored sources and private registries defined only in that configuration are then ignored, so the action fails if your workspace needs them. This narrows the risk; it does not make a privileged job safe for untrusted code.
 
+The `tj-actions/changed-files` settings above matter:
+
+- `json: true` with `escape_json: false` produces a plain JSON array.
+- `safe_output: false` and `quotepath: false` keep filenames exactly as they are in the repository. The list is passed to this action through `with:`, never interpolated into a shell script, which is what makes turning `safe_output` off safe here.
+
+To build the list with git alone, use NUL-separated output so that no name is quoted or split:
+
+```yaml
+      - id: changed
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          files=$(git diff --name-only --no-renames -z "$BASE" "$HEAD" | jq -Rsc 'split("\u0000") | map(select(. != ""))')
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+```
+
+`--no-renames` lists a renamed file as a deletion and an addition, so both paths are included. The checkout needs enough history to contain both commits.
+
 ## Configure shared files
 
 Some changes should test everything. Add those files or directories to `force_triggers`:
@@ -120,11 +142,11 @@ This excludes the package named `internal-helper` and packages under `tools/`. O
 
 ## Inputs and outputs
 
-Input lists accept spaces or newlines between entries.
+`changed_files_json` is a JSON array. The other lists accept spaces or newlines between entries.
 
 | Input | Description |
 |---|---|
-| `changed_files` | **Required.** Changed paths relative to the workspace root. |
+| `changed_files_json` | **Required.** JSON array of changed paths relative to the workspace root, such as `["src/lib.rs","docs/my file.md"]`. Use `[]` when nothing changed. |
 | `force_triggers` | Paths or patterns that select all non-excluded packages. |
 | `excluded_members` | Package names or directory paths to omit. |
 | `ignore_cargo_config` | `true` runs Cargo without the repository's Cargo configuration. Default `false`. |
@@ -142,12 +164,26 @@ Package lists are JSON arrays, such as `["shared-lib","api-server"]`. Use `fromJ
 
 ## Things to know
 
-- **Include deleted and renamed files.** The quick-start example handles both. Filenames containing whitespace are unsupported.
-- **Git-quoted paths are decoded.** `git diff --name-only` quotes unusual names, such as `"caf\303\251.rs"`. These are read correctly. A quoted name that cannot be decoded, such as one containing a space, is ignored with a warning.
+- **Include deleted and renamed files.** The quick-start example handles both.
+- **Paths are exact.** Each array element is one path, so names with spaces, quotes or non-ASCII characters work. Nothing is unquoted: pass real names, not git's quoted form such as `"caf\303\251.rs"`.
+- **A missing list fails the action.** `changed_files_json` must be a JSON array of strings. A blank value is treated as a broken workflow, not as "nothing changed".
 - **Local crates outside the workspace count.** A change to a path dependency, `[patch]` target or vendored crate inside the repository selects the packages that depend on it. Only workspace packages are listed.
-- **Empty input does not test everything.** It produces a warning and empty results after validation.
+- **An empty array does not test everything.** `[]` produces a warning and empty results after validation.
 - **Shared files need care.** Detection uses package directories and current Cargo dependencies. It cannot discover every build-script input or reconstruct removed packages. Use force triggers for shared inputs inside the workspace; handle outside files in your workflow.
 - **Runner requirement:** Run the detection job on Linux, such as `ubuntu-latest`. Separate build and test jobs can use any operating system and their own Rust toolchain.
 - **Cargo may download dependencies.** An outdated lockfile fails the action. A missing lockfile may be created.
 
 Invalid configuration or Cargo failures fail the action rather than return partial results.
+
+## Migrating from v4
+
+v5 replaces the `changed_files` input with `changed_files_json`.
+
+| v4 | v5 |
+|---|---|
+| `changed_files: a.rs b.rs` | `changed_files_json: '["a.rs","b.rs"]'` |
+| Empty or missing value meant "nothing changed" | `[]` means "nothing changed"; a blank value fails |
+| Filenames containing whitespace unsupported | Any filename works |
+| Git-quoted names were decoded | Names are taken literally |
+
+Change the step that produces the list to emit JSON, as in the quick start, and rename the input. A workflow that still passes `changed_files` fails with a message naming `changed_files_json`, so it cannot silently select nothing.
