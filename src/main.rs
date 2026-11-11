@@ -73,7 +73,44 @@ fn flag(name: &str) -> Result<bool, String> {
     }
 }
 
+/// Inputs removed in v5, and what to do instead.
+const REMOVED_INPUTS: [(&str, &str); 3] = [
+    (
+        "changed_files",
+        "use changed_files_json, a JSON array of paths",
+    ),
+    ("excluded_members", "renamed to excluded_packages"),
+    (
+        "ignore_cargo_config",
+        "Cargo configuration is now unread unless trust_cargo_config is true",
+    ),
+];
+
+/// Fail when a workflow still passes an input that no longer exists.
+///
+/// The runner only warns about an undeclared input, and still hands it to the
+/// container as `INPUT_<NAME>`. Left alone, a v4 workflow's `excluded_members`
+/// would be ignored and its packages would quietly return to the outputs.
+fn reject_removed_inputs() -> Result<(), String> {
+    let passed: Vec<String> = REMOVED_INPUTS
+        .iter()
+        .filter(|(name, _)| {
+            env::var_os(format!("INPUT_{}", name.to_uppercase()))
+                .is_some_and(|value| !value.to_string_lossy().trim().is_empty())
+        })
+        .map(|(name, advice)| format!("{name} ({advice})"))
+        .collect();
+    if passed.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "inputs removed in v5 were passed: {}. See \"Migrating from v4\" in the README.",
+        passed.join("; ")
+    ))
+}
+
 fn run() -> Result<(), String> {
+    reject_removed_inputs()?;
     let trust_cargo_config = flag("TRUST_CARGO_CONFIG")?;
     let force_triggers = input("FORCE_TRIGGERS")?;
     let excluded: HashSet<String> = input("EXCLUDED_PACKAGES")?.into_iter().collect();

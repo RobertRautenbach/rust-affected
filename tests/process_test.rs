@@ -44,6 +44,9 @@ fn command(cwd: &Path) -> Command {
         "IGNORE_CARGO_CONFIG",
         "TRUST_CARGO_CONFIG",
         "CHANGED_FILES_JSON",
+        "INPUT_CHANGED_FILES",
+        "INPUT_EXCLUDED_MEMBERS",
+        "INPUT_IGNORE_CARGO_CONFIG",
     ] {
         cmd.env_remove(key);
     }
@@ -468,6 +471,68 @@ fn an_empty_array_is_valid_and_still_warns() {
             "{\"affected_binaries\":[],\"affected_libraries\":[],\"changed_packages\":[],\"force_all\":false}\n"
         );
     }
+}
+
+#[test]
+fn inputs_removed_in_v5_fail_instead_of_being_ignored() {
+    // The runner hands every `with:` key to the container as INPUT_<NAME>,
+    // including ones action.yml no longer declares.
+    let changed = ("CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#);
+    for (variable, advice) in [
+        (
+            "INPUT_CHANGED_FILES",
+            "changed_files (use changed_files_json, a JSON array of paths)",
+        ),
+        (
+            "INPUT_EXCLUDED_MEMBERS",
+            "excluded_members (renamed to excluded_packages)",
+        ),
+        (
+            "INPUT_IGNORE_CARGO_CONFIG",
+            "ignore_cargo_config (Cargo configuration is now unread unless trust_cargo_config is true)",
+        ),
+    ] {
+        for value in ["lib-utils", "false"] {
+            let output = run(&fixture(), &[changed, (variable, value)]);
+            assert_error(&output, "inputs removed in v5 were passed: ");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(advice), "{stderr}");
+            assert!(
+                stderr.contains("See \"Migrating from v4\" in the README."),
+                "{stderr}"
+            );
+        }
+    }
+    // Every removed input that was passed is named, in one error, before anything else is read.
+    let output = run(
+        &fixture(),
+        &[
+            ("INPUT_EXCLUDED_MEMBERS", "tools/"),
+            ("INPUT_CHANGED_FILES", "lib-core/src/lib.rs"),
+            ("FORCE_TRIGGERS", "[abc"),
+        ],
+    );
+    assert_error(
+        &output,
+        "inputs removed in v5 were passed: changed_files (use changed_files_json, a JSON array of paths); excluded_members (renamed to excluded_packages). See",
+    );
+    // A blank value sets nothing, so it is not worth failing over, and the
+    // current inputs' own INPUT_ variables are not mistaken for removed ones.
+    let output = run(
+        &fixture(),
+        &[
+            changed,
+            ("INPUT_CHANGED_FILES", ""),
+            ("INPUT_EXCLUDED_MEMBERS", " \n"),
+            ("INPUT_IGNORE_CARGO_CONFIG", ""),
+            ("INPUT_CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#),
+            ("INPUT_EXCLUDED_PACKAGES", "tools/"),
+            ("INPUT_TRUST_CARGO_CONFIG", "false"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr, "");
 }
 
 #[test]
