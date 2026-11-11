@@ -74,12 +74,12 @@ fn flag(name: &str) -> Result<bool, String> {
 }
 
 fn run() -> Result<(), String> {
-    let ignore_cargo_config = flag("IGNORE_CARGO_CONFIG")?;
+    let trust_cargo_config = flag("TRUST_CARGO_CONFIG")?;
     let force_triggers = input("FORCE_TRIGGERS")?;
     let excluded: HashSet<String> = input("EXCLUDED_MEMBERS")?.into_iter().collect();
     // Last, so that its empty-list warning never precedes another input's error.
     let changed_files = changed_files()?;
-    let graph = load_graph(ignore_cargo_config)?;
+    let graph = load_graph(trust_cargo_config)?;
     let result = compute_affected(&graph, &changed_files, &force_triggers, &excluded)
         .map_err(|error| error.to_string())?;
     emit_warnings(&result.warnings)?;
@@ -167,20 +167,22 @@ fn resolved_metadata(metadata: &MetadataCommand) -> Result<String, String> {
     Ok(json.to_owned())
 }
 
-fn load_graph(ignore_cargo_config: bool) -> Result<WorkspaceGraph, String> {
+fn load_graph(trust_cargo_config: bool) -> Result<WorkspaceGraph, String> {
     let mut metadata = MetadataCommand::new();
     // Discover the lock next to the workspace manifest, even when run in a member.
     let mut locate = Command::new(metadata.cargo_command().get_program());
     locate.args(["locate-project", "--workspace", "--message-format", "plain"]);
-    let neutral = if ignore_cargo_config {
+    // A checkout's configuration can make Cargo run any program, so Cargo only
+    // starts where it can read that configuration when told the checkout is trusted.
+    let neutral = if trust_cargo_config {
+        None
+    } else {
         let (manifest, root) = outside_checkout()?;
         locate
             .arg("--manifest-path")
             .arg(manifest)
             .current_dir(&root);
         Some(root)
-    } else {
-        None
     };
     let manifest = workspace_manifest(&mut locate)?;
     if let Some(neutral) = neutral {
