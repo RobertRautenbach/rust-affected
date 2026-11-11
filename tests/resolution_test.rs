@@ -123,6 +123,47 @@ fn cargo_selected_identities_control_affected_members() {
 }
 
 #[test]
+fn non_member_path_packages_own_their_files_without_being_reported() {
+    // app -> adapter -> bridge -> core and second -> bridge; adapter and bridge
+    // are excluded from the workspace but live beneath its root.
+    let graph = WorkspaceGraph::from_json(&metadata("bridge").to_string()).unwrap();
+    for (file, binaries) in [
+        ("external/adapter/src/lib.rs", vec!["app"]),
+        ("external/adapter/Cargo.toml", vec!["app"]),
+        ("external/bridge/src/gone.rs", vec!["app", "second"]),
+    ] {
+        let result =
+            compute_affected(&graph, &[file.into()], &[], &HashSet::<String>::new()).unwrap();
+        assert_eq!(result.changed_crates, Vec::<String>::new(), "{file}");
+        assert_eq!(
+            result.affected_library_members,
+            Vec::<String>::new(),
+            "{file}"
+        );
+        assert_eq!(result.affected_binary_members, binaries, "{file}");
+        assert_eq!(result.warnings, [], "{file}");
+    }
+    // A directory that merely contains such packages owns nothing.
+    let result = compute_affected(
+        &graph,
+        &["external/README.md".into()],
+        &[],
+        &HashSet::<String>::new(),
+    )
+    .unwrap();
+    assert_eq!(result.affected_binary_members, Vec::<String>::new());
+    // Exclusions still filter the reported members only.
+    let result = compute_affected(
+        &graph,
+        &["external/bridge/src/lib.rs".into()],
+        &[],
+        &HashSet::from(["app".into()]),
+    )
+    .unwrap();
+    assert_eq!(result.affected_binary_members, ["second"]);
+}
+
+#[test]
 fn unresolved_or_inconsistent_metadata_is_rejected() {
     let valid = metadata("patch-selected");
     for mutation in [

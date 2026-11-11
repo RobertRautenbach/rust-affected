@@ -12,8 +12,9 @@ inputs:
     description: >
       Space- or newline-separated list of changed file paths relative to the
       workspace root, including deletions and both paths of renames. Leading ./
-      and absolute paths beneath the workspace root are accepted. Filenames
-      containing whitespace are unsupported. Typically produced by a prior step such as
+      and absolute paths beneath the workspace root are accepted, as are paths
+      quoted by git (core.quotePath). Filenames containing whitespace are
+      unsupported. Typically produced by a prior step such as
       `git diff --name-only`, `tj-actions/changed-files`, or
       `dorny/paths-filter`.
     required: true
@@ -24,6 +25,8 @@ inputs:
       A bare name (e.g. "Cargo.lock") matches that exact path only.
       A trailing slash (e.g. "infra/") matches the directory and everything inside it.
       Full glob patterns are also supported (e.g. "**/*.sql", ".github/**").
+      Patterns are relative to the workspace root; an empty or absolute pattern,
+      or one containing "..", can never match and fails the action.
       If omitted, no force triggers are applied.
     required: false
   excluded_members:
@@ -39,6 +42,17 @@ inputs:
       tooling or helper crates that should never be deployed.
       If omitted, no members are excluded.
     required: false
+  ignore_cargo_config:
+    description: >
+      Set to "true" to run Cargo from outside the checkout, so the repository's
+      .cargo/config.toml and rust-toolchain files are not read. A pull request
+      can otherwise use them to make Cargo run arbitrary programs during
+      detection. Settings that only exist in that configuration, such as
+      [patch] entries, vendored sources and private registries, are then
+      ignored, and resolution fails if the workspace depends on them.
+      Defaults to "false".
+    required: false
+    default: 'false'
 
 outputs:
   changed_crates:
@@ -57,3 +71,4 @@ runs:
     CHANGED_FILES: ${{ inputs.changed_files }}
     FORCE_TRIGGERS: ${{ inputs.force_triggers }}
     EXCLUDED_MEMBERS: ${{ inputs.excluded_members }}
+    IGNORE_CARGO_CONFIG: ${{ inputs.ignore_cargo_config }}

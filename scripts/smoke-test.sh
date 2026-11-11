@@ -226,6 +226,29 @@ affected_library_members=[]
 affected_binary_members=[]
 force_all=false'
 
+run_failing_case "unmatchable trigger" "${FIXTURE}" "x" "/Cargo.lock" "" 'can never match'
+
+run_case "git-quoted changed path" "${FIXTURE}" \
+  '"lib-utils/src/caf\303\251.rs"' "" "" \
+'changed_crates=["lib-utils"]
+affected_library_members=["lib-core","lib-core-ext","lib-utils"]
+affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+force_all=false'
+
+EXPECTED_ANNOTATIONS='::warning::workspace-wide files changed but belong to no package and matched no force trigger, so nothing was selected for them: ["Cargo.lock"]. They can affect every package; add them to force_triggers.' \
+run_case "uncovered workspace-wide file" "${FIXTURE}" "Cargo.lock" "" "" \
+'changed_crates=[]
+affected_library_members=[]
+affected_binary_members=[]
+force_all=false'
+
+run_case "non-member path dependency owns its files" "${REPO_ROOT}/tests/fixtures/bridge" \
+  "external/adapter/src/lib.rs" "" "" \
+'changed_crates=[]
+affected_library_members=[]
+affected_binary_members=["app"]
+force_all=false'
+
 copy_fixture() {
   mkdir -p "$1"
   tar -C "${FIXTURE}" --exclude=target -cf - . | tar -C "$1" -xf -
@@ -300,9 +323,40 @@ affected_binary_members=["app-alpha","app-beta","tool-alpha"]
 force_all=false'
 run_failing_case "unpinned toolchain fails without installing" "${TOOLCHAIN_WS}" "lib-utils/src/lib.rs" "" "" 'is not installed' \
   -e RUSTUP_TOOLCHAIN=
+# Started outside the checkout, rustup cannot see the toolchain file either.
+run_case "toolchain file unread when cargo config is ignored" "${TOOLCHAIN_WS}" "lib-utils/src/lib.rs" "" "" \
+'changed_crates=["lib-utils"]
+affected_library_members=["lib-core","lib-core-ext","lib-utils"]
+affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+force_all=false' \
+  -e RUSTUP_TOOLCHAIN= -e IGNORE_CARGO_CONFIG=true
 if [[ "${toolchain_before}" != "$(snapshot "${TOOLCHAIN_WS}")" ]]; then
   fail "toolchain cases modified the workspace"
 fi
+
+# A checkout's .cargo/config.toml can point Cargo at any program, and Cargo runs
+# it during detection. ignore_cargo_config must keep that program from running.
+CONFIG_WS="${TMP_PARENT}/config-workspace"
+copy_fixture "${CONFIG_WS}"
+mkdir -p "${CONFIG_WS}/.cargo"
+printf '#!/bin/sh\ntouch /github/workspace/EXECUTED\nexec rustc "$@"\n' > "${CONFIG_WS}/planted-rustc"
+chmod +x "${CONFIG_WS}/planted-rustc"
+printf '[build]\nrustc = "/github/workspace/planted-rustc"\n' > "${CONFIG_WS}/.cargo/config.toml"
+CONFIG_EXPECTED='changed_crates=["lib-utils"]
+affected_library_members=["lib-core","lib-core-ext","lib-utils"]
+affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+force_all=false'
+run_case "repository cargo config honoured by default" "${CONFIG_WS}" "lib-utils/src/lib.rs" "" "" "${CONFIG_EXPECTED}"
+# Without this, the cases below would pass even if the isolation did nothing.
+[[ -f "${CONFIG_WS}/EXECUTED" ]] || fail "the planted program did not run by default"
+rm -f "${CONFIG_WS}/EXECUTED"
+config_before="$(snapshot "${CONFIG_WS}")"
+run_case "repository cargo config ignored" "${CONFIG_WS}" "lib-utils/src/lib.rs" "" "" "${CONFIG_EXPECTED}" \
+  -e IGNORE_CARGO_CONFIG=true
+run_case "repository cargo config ignored from a member" "${CONFIG_WS}" "lib-utils/src/lib.rs" "" "" "${CONFIG_EXPECTED}" \
+  -e IGNORE_CARGO_CONFIG=true --workdir /github/workspace/app-alpha
+[[ "${config_before}" = "$(snapshot "${CONFIG_WS}")" ]] || fail "ignore_cargo_config still ran the planted program or changed the workspace"
+run_failing_case "invalid ignore_cargo_config" "${FIXTURE}" "x" "" "" "IGNORE_CARGO_CONFIG must be" -e IGNORE_CARGO_CONFIG=yes
 
 # The dependency repository is owned by the host user while the container runs
 # as root, and git refuses to serve a repository owned by someone else unless it

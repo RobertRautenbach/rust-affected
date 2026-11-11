@@ -5,7 +5,7 @@ use std::{
     env,
     fs::File,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -38,7 +38,17 @@ fn input(name: &str) -> Result<Vec<String>, String> {
     Ok(value.split_whitespace().map(String::from).collect())
 }
 
+fn flag(name: &str) -> Result<bool, String> {
+    // Anything but an exact boolean fails, so a typo cannot disable a safeguard.
+    match env::var_os(name).unwrap_or_default().to_str() {
+        Some("" | "false") => Ok(false),
+        Some("true") => Ok(true),
+        _ => Err(format!("{name} must be 'true' or 'false'")),
+    }
+}
+
 fn run() -> Result<(), String> {
+    let ignore_cargo_config = flag("IGNORE_CARGO_CONFIG")?;
     let changed_files = input("CHANGED_FILES")?;
     let force_triggers = input("FORCE_TRIGGERS")?;
     let excluded: HashSet<String> = input("EXCLUDED_MEMBERS")?.into_iter().collect();
@@ -48,7 +58,7 @@ fn run() -> Result<(), String> {
             "changed_files is empty; no files will be attributed. If files did change, check the step producing changed_files. Workspace and configuration validation still run.",
         )?;
     }
-    let graph = load_graph()?;
+    let graph = load_graph(ignore_cargo_config)?;
     let result = compute_affected(&graph, &changed_files, &force_triggers, &excluded)
         .map_err(|error| error.to_string())?;
     emit_warnings(&result.warnings)?;
@@ -77,11 +87,39 @@ fn run_cargo(command: &mut Command, operation: &str) -> Result<Vec<u8>, String> 
     Ok(output.stdout)
 }
 
-fn load_graph() -> Result<WorkspaceGraph, String> {
+/// The nearest manifest, as Cargo would find it, and the filesystem root.
+///
+/// Cargo and rustup read configuration from the working directory upwards and
+/// never from `--manifest-path`. Started at the filesystem root, they cannot see
+/// a checkout's `.cargo/config.toml` or `rust-toolchain.toml`, which could
+/// otherwise make them run arbitrary programs.
+fn outside_checkout() -> Result<(PathBuf, PathBuf), String> {
+    let cwd = env::current_dir()
+        .map_err(|error| format!("failed to read the working directory: {error}"))?;
+    let manifest = cwd
+        .ancestors()
+        .map(|directory| directory.join("Cargo.toml"))
+        .find(|manifest| manifest.is_file())
+        .ok_or("could not find Cargo.toml in the working directory or any parent directory")?;
+    let root = cwd.ancestors().last().unwrap_or(&cwd).to_path_buf();
+    Ok((manifest, root))
+}
+
+fn load_graph(ignore_cargo_config: bool) -> Result<WorkspaceGraph, String> {
     let mut metadata = MetadataCommand::new();
     // Discover the lock next to the workspace manifest, even when run in a member.
     let mut locate = Command::new(metadata.cargo_command().get_program());
     locate.args(["locate-project", "--workspace", "--message-format", "plain"]);
+    let neutral = if ignore_cargo_config {
+        let (manifest, root) = outside_checkout()?;
+        locate
+            .arg("--manifest-path")
+            .arg(manifest)
+            .current_dir(&root);
+        Some(root)
+    } else {
+        None
+    };
     let manifest = String::from_utf8(run_cargo(&mut locate, "locate-project")?)
         .map_err(|_| "cargo locate-project output is not valid UTF-8".to_string())?;
     let manifest = Path::new(manifest.trim_end_matches(['\r', '\n']));
@@ -91,6 +129,9 @@ fn load_graph() -> Result<WorkspaceGraph, String> {
     let root = manifest
         .parent()
         .ok_or("cargo locate-project returned an invalid workspace manifest path")?;
+    if let Some(neutral) = neutral {
+        metadata.manifest_path(manifest).current_dir(neutral);
+    }
     if root
         .join("Cargo.lock")
         .try_exists()
@@ -116,11 +157,13 @@ fn emit_warnings(warnings: &[Warning]) -> Result<(), String> {
     let mut paths = Vec::new();
     let mut exclusions = Vec::new();
     let mut external_targets = Vec::new();
+    let mut uncovered = Vec::new();
     for warning in warnings {
         match warning {
             Warning::UnusablePath(path) => paths.push(path.as_str()),
             Warning::UnmatchedExclusion(entry) => exclusions.push(entry.as_str()),
             Warning::ExternalTarget(member) => external_targets.push(member.as_str()),
+            Warning::UncoveredRootFile(file) => uncovered.push(file.as_str()),
         }
     }
     if !paths.is_empty() {
@@ -145,6 +188,14 @@ fn emit_warnings(warnings: &[Warning]) -> Result<(), String> {
             "warning",
             &format!(
                 "workspace members declare targets outside their package directories: {external_targets:?}. Changes to those sources may not affect the declaring members. Configure force_triggers for shared source directories within the workspace root; sources outside that root require workflow-level invalidation."
+            ),
+        )?;
+    }
+    if !uncovered.is_empty() {
+        annotation(
+            "warning",
+            &format!(
+                "workspace-wide files changed but belong to no package and matched no force trigger, so nothing was selected for them: {uncovered:?}. They can affect every package; add them to force_triggers."
             ),
         )?;
     }

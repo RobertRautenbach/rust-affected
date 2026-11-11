@@ -337,7 +337,14 @@ fn exclusions_are_normalized_component_prefixes() {
 
 #[test]
 fn directory_force_triggers_match_the_directory_and_descendants_only() {
-    for trigger in ["infra/", "./infra/", "././infra/"] {
+    for trigger in [
+        "infra/",
+        "./infra/",
+        "././infra/",
+        "infra//",
+        ".//infra/",
+        "infra/./",
+    ] {
         for file in [
             "infra",
             "infra/",
@@ -362,6 +369,135 @@ fn directory_force_triggers_match_the_directory_and_descendants_only() {
             );
         }
     }
+}
+
+#[test]
+fn force_triggers_that_can_never_match_are_rejected() {
+    for trigger in [
+        "",
+        ".",
+        "./",
+        "/",
+        "//",
+        "/Cargo.lock",
+        "/abs/infra/",
+        "..",
+        "../shared/",
+        "infra/../infra/",
+    ] {
+        for files in [vec![], vec!["infra/deploy.yml".to_string()]] {
+            let error = compute_affected(
+                graph("workspace"),
+                &files,
+                &[trigger.into()],
+                &HashSet::<String>::new(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&error, rust_affected::Error::UnmatchableForceTrigger(t) if t == trigger),
+                "{trigger:?}: {error}"
+            );
+            assert!(error.to_string().contains(&format!("{trigger:?}")));
+        }
+    }
+    // Separators inside a pattern are normalized, not rejected.
+    for trigger in ["lib-core//src/*.rs", "./lib-core/./src/**", "**//*.rs"] {
+        assert!(compute("workspace", &["lib-core/src/lib.rs"], &[trigger], &[]).force_all);
+    }
+}
+
+#[test]
+fn git_quoted_paths_are_decoded_before_attribution() {
+    let expected = compute("workspace", &["lib-core/src/lib.rs"], &[], &[]);
+    for file in [
+        r#""lib-core/src/caf\303\251.rs""#,
+        r#""lib-core/src/a\"b.rs""#,
+        r#""lib-core/src/a\\b.rs""#,
+        r#""lib-core/src/tab\there.rs""#,
+        r#""lib-core/src/\001\a\b\v\f\n\r.rs""#,
+        r#""./lib-core//src/lib.rs""#,
+    ] {
+        assert_eq!(compute("workspace", &[file], &[], &[]), expected, "{file}");
+    }
+    assert!(
+        compute(
+            "workspace",
+            &[r#""infra/caf\303\251.yml""#],
+            &["infra/café.yml"],
+            &[]
+        )
+        .force_all
+    );
+    // Undecodable quotes own nothing, force nothing and are reported.
+    for file in [
+        r#""lib-core/src/my"#,
+        r#"""#,
+        r#""""#,
+        r#""lib-core/src/a"b.rs""#,
+        r#""lib-core/src/\x41.rs""#,
+        r#""lib-core/src/\08.rs""#,
+        r#""lib-core/src/\400.rs""#,
+        r#""lib-core/src/\377.rs""#,
+        r#""lib-core/src/trailing\""#,
+        r#""../lib-core/src/lib.rs""#,
+    ] {
+        let result = compute("workspace", &[file], &["**"], &[]);
+        assert_lists(&result, &[], &[], &[]);
+        assert_eq!(
+            result.warnings,
+            [rust_affected::Warning::UnusablePath(file.into())],
+            "{file}"
+        );
+    }
+}
+
+#[test]
+fn workspace_wide_files_warn_only_when_nothing_covers_them() {
+    use rust_affected::Warning::UncoveredRootFile;
+    let files = [
+        "rust-toolchain.toml",
+        "./Cargo.lock",
+        "Cargo.toml",
+        ".cargo/config.toml",
+        ".cargo/config",
+        "rust-toolchain",
+        "Cargo.lock",
+    ];
+    let result = compute("workspace", &files, &[], &[]);
+    assert_lists(&result, &[], &[], &[]);
+    assert_eq!(
+        result.warnings,
+        [
+            ".cargo/config",
+            ".cargo/config.toml",
+            "Cargo.lock",
+            "Cargo.toml",
+            "rust-toolchain",
+            "rust-toolchain.toml",
+        ]
+        .map(|file| UncoveredRootFile(file.into()))
+    );
+    // Any matching trigger selects everything, so nothing is left uncovered.
+    let forced = compute("workspace", &files, &["Cargo.lock"], &[]);
+    assert!(forced.force_all);
+    assert_eq!(forced.warnings, []);
+    // A trigger that does not match leaves the gap in place.
+    assert_eq!(
+        compute("workspace", &["Cargo.lock"], &["infra/"], &[]).warnings,
+        [UncoveredRootFile("Cargo.lock".into())]
+    );
+    // Other root files, and the same names inside a package, are ordinary files.
+    for file in ["README.md", "lib-core/Cargo.toml", "tools/Cargo.lock"] {
+        assert_eq!(
+            compute("workspace", &[file], &[], &[]).warnings,
+            [],
+            "{file}"
+        );
+    }
+    // A root package owns the root files, so they select it instead.
+    let owned = compute("root-package", &["Cargo.lock", "Cargo.toml"], &[], &[]);
+    assert_eq!(owned.changed_crates, ["root-app"]);
+    assert_eq!(owned.warnings, []);
 }
 
 #[test]

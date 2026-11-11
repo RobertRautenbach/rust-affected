@@ -11,6 +11,8 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Debug)]
 pub enum Error {
     InvalidForceTrigger(globset::Error),
+    /// A pattern that no workspace-relative path can match.
+    UnmatchableForceTrigger(String),
     Graph(guppy::Error),
     InvalidMetadata(serde_json::Error),
     IncompleteMetadata(String),
@@ -22,6 +24,10 @@ impl fmt::Display for Error {
             Self::InvalidForceTrigger(error) => {
                 write!(f, "invalid force_triggers pattern: {error}")
             }
+            Self::UnmatchableForceTrigger(trigger) => write!(
+                f,
+                "force_triggers pattern {trigger:?} can never match: patterns are relative to the workspace root, so empty patterns, absolute paths and '..' are not supported (use '**' to match every file)"
+            ),
             Self::Graph(error) => write!(f, "failed to build or query package graph: {error}"),
             Self::InvalidMetadata(error) => write!(f, "invalid cargo metadata: {error}"),
             Self::IncompleteMetadata(error) => write!(f, "failed to build package graph: {error}"),
@@ -35,7 +41,7 @@ impl std::error::Error for Error {
             Self::InvalidForceTrigger(error) => error,
             Self::Graph(error) => error,
             Self::InvalidMetadata(error) => error,
-            Self::IncompleteMetadata(_) => return None,
+            Self::UnmatchableForceTrigger(_) | Self::IncompleteMetadata(_) => return None,
         })
     }
 }
@@ -47,7 +53,20 @@ pub enum Warning {
     UnmatchedExclusion(String),
     /// A workspace member declares a target outside its package directory.
     ExternalTarget(String),
+    /// A workspace-wide Cargo file changed, but no package owns it and no force
+    /// trigger matched, so the change selected nothing.
+    UncoveredRootFile(String),
 }
+
+/// Root files that can change how every package builds.
+const WORKSPACE_WIDE_FILES: [&str; 6] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo/config.toml",
+    ".cargo/config",
+    "rust-toolchain.toml",
+    "rust-toolchain",
+];
 
 /// Sorted workspace-member names and diagnostics from affected-file analysis.
 /// Serialization includes the four action outputs; warnings remain diagnostics.
@@ -74,7 +93,53 @@ fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
     (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
+// Git C-quotes names with unusual bytes, such as "caf\303\251.rs", unless
+// core.quotePath is off or -z is used. Left quoted, they would own nothing.
+fn unquote_git_path(quoted: &str) -> Option<String> {
+    let inner = quoted.strip_prefix('"')?.strip_suffix('"')?;
+    let mut bytes = Vec::with_capacity(inner.len());
+    let mut rest = inner.bytes();
+    while let Some(byte) = rest.next() {
+        if byte == b'"' {
+            return None;
+        }
+        if byte != b'\\' {
+            bytes.push(byte);
+            continue;
+        }
+        bytes.push(match rest.next()? {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 0x0b,
+            b'f' => 0x0c,
+            b'r' => b'\r',
+            escaped @ (b'"' | b'\\') => escaped,
+            // Git always writes three octal digits, and a byte needs no more.
+            high @ b'0'..=b'3' => {
+                let mut value = high - b'0';
+                for _ in 0..2 {
+                    let digit = rest.next().filter(|digit| (b'0'..=b'7').contains(digit))?;
+                    value = value * 8 + (digit - b'0');
+                }
+                value
+            }
+            _ => return None,
+        });
+    }
+    String::from_utf8(bytes).ok()
+}
+
 fn normalize_changed_file(file: &str, root: &Path) -> Option<PathBuf> {
+    // A quote that cannot be decoded (a name split on whitespace) is unusable.
+    let unquoted;
+    let file = if file.starts_with('"') {
+        unquoted = unquote_git_path(file)?;
+        unquoted.as_str()
+    } else {
+        file
+    };
     let path = Path::new(file);
     let relative = if path.is_absolute() {
         path.strip_prefix(root).ok()?
@@ -96,8 +161,11 @@ fn exclusion_matches(entry: &str, name: &str, directory: &Path) -> bool {
 
 /// Match normalized workspace-relative paths against force-trigger globs.
 ///
+/// Patterns are normalized like paths: `./` and repeated separators are dropped.
+///
 /// # Errors
-/// Returns an error for invalid patterns, even when there are no files.
+/// Returns an error for invalid patterns and for patterns no relative path can
+/// match (empty, absolute or containing `..`), even when there are no files.
 pub fn check_force_triggers(
     changed_files: &[String],
     force_triggers: &[String],
@@ -108,18 +176,68 @@ pub fn check_force_triggers(
 
     let mut builder = GlobSetBuilder::new();
     for trigger in force_triggers {
-        let trigger = trigger.trim_start_matches("./");
-        let pattern = if trigger.ends_with('/') {
-            builder
-                .add(Glob::new(trigger.trim_end_matches('/')).map_err(Error::InvalidForceTrigger)?);
-            format!("{trigger}**")
-        } else {
-            trigger.to_string()
-        };
+        // Changed files are compared in normalized form, so patterns must be too:
+        // "infra//" would otherwise never fire, and nothing would say so.
+        let unmatchable = || Error::UnmatchableForceTrigger(trigger.clone());
+        let mut parts = Vec::new();
+        for part in trigger.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => return Err(unmatchable()),
+                _ => parts.push(part),
+            }
+        }
+        if trigger.starts_with('/') || parts.is_empty() {
+            return Err(unmatchable());
+        }
+        let pattern = parts.join("/");
+        if trigger.ends_with('/') {
+            builder.add(Glob::new(&format!("{pattern}/**")).map_err(Error::InvalidForceTrigger)?);
+        }
         builder.add(Glob::new(&pattern).map_err(Error::InvalidForceTrigger)?);
     }
     let globset = builder.build().map_err(Error::InvalidForceTrigger)?;
     Ok(changed_files.iter().any(|f| globset.is_match(f)))
+}
+
+/// The packages owning `files`, warning about workspace-wide files nobody covers.
+///
+/// Every package Cargo loaded from beneath the root can own files, not only
+/// members: an excluded path dependency, a `[patch]` target or a vendored crate
+/// still reaches members through the resolved graph. Only members are reported.
+fn direct_owners(
+    graph: &guppy::graph::PackageGraph,
+    files: &[PathBuf],
+    force_all: bool,
+    warnings: &mut Vec<Warning>,
+) -> HashSet<guppy::PackageId> {
+    let root = graph.workspace().root();
+    let owners: Vec<_> = graph
+        .packages()
+        .filter_map(|pkg| {
+            let dir = pkg.manifest_path().parent()?.strip_prefix(root);
+            Some((dir.ok()?, pkg))
+        })
+        .collect();
+    let mut direct_ids = HashSet::new();
+    for file in files {
+        if let Some((_, pkg)) = owners
+            .iter()
+            .filter(|(dir, _)| file.starts_with(dir.as_std_path()))
+            .max_by_key(|(dir, _)| dir.components().count())
+        {
+            direct_ids.insert(pkg.id().clone());
+        } else if !force_all
+            && WORKSPACE_WIDE_FILES
+                .iter()
+                .any(|name| file == Path::new(name))
+        {
+            warnings.push(Warning::UncoveredRootFile(
+                file.to_string_lossy().into_owned(),
+            ));
+        }
+    }
+    direct_ids
 }
 
 /// Compute which workspace crates are affected by a set of changed files.
@@ -137,10 +255,14 @@ pub fn check_force_triggers(
 /// package's directory relative to the workspace root (e.g. `tools/` excludes
 /// every crate under `tools/`). Entries without `/` are matched against the crate
 /// name directly. A prefix includes nested members. Each accepted path is owned
-/// by its deepest matching member, before exclusions are applied.
+/// by the deepest package containing it, before exclusions are applied. Owners
+/// include non-member packages beneath the workspace root (excluded path
+/// dependencies, `[patch]` targets, vendored crates); these are never reported
+/// themselves, but the members that depend on them are.
 ///
-/// Paths are normalized lexically, so deleted files work. Unusable paths are
-/// warned about and ignored, including for force triggers.
+/// Paths are normalized lexically, so deleted files work. Git-quoted paths are
+/// decoded first. Unusable paths are warned about and ignored, including for
+/// force triggers.
 ///
 /// # Errors
 /// Returns an error for invalid force-trigger patterns or failed graph queries.
@@ -192,19 +314,10 @@ pub fn compute_affected<S: BuildHasher>(
             warnings.push(Warning::UnmatchedExclusion(entry.clone()));
         }
     }
+
+    let direct_ids = direct_owners(graph, &files, force_all, &mut warnings);
     warnings.sort();
     warnings.dedup();
-
-    let mut direct_ids = HashSet::new();
-    for file in &files {
-        if let Some((_, pkg)) = members
-            .iter()
-            .filter(|(dir, _)| file.starts_with(dir.as_std_path()))
-            .max_by_key(|(dir, _)| dir.components().count())
-        {
-            direct_ids.insert(pkg.id().clone());
-        }
-    }
 
     let affected_set = if force_all {
         graph.query_workspace().resolve()
