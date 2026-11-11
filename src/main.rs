@@ -138,7 +138,8 @@ fn workspace_manifest(locate: &mut Command) -> Result<PathBuf, String> {
 }
 
 /// Resolve with `--locked` when the workspace has a lock, and warn when it has none.
-fn respect_lock(metadata: &mut MetadataCommand, manifest: &Path) -> Result<(), String> {
+/// Returns whether a lock constrains the resolution.
+fn respect_lock(metadata: &mut MetadataCommand, manifest: &Path) -> Result<bool, String> {
     let root = manifest
         .parent()
         .ok_or("cargo locate-project returned an invalid workspace manifest path")?;
@@ -148,12 +149,51 @@ fn respect_lock(metadata: &mut MetadataCommand, manifest: &Path) -> Result<(), S
         .map_err(|error| format!("failed to inspect workspace Cargo.lock: {error}"))?
     {
         metadata.other_options(["--locked"]);
-        return Ok(());
+        return Ok(true);
     }
     annotation(
         "warning",
         "No Cargo.lock in the workspace root; cargo metadata will resolve dependencies and may create one (owned by root inside the action). Commit Cargo.lock to use --locked.",
-    )
+    )?;
+    Ok(false)
+}
+
+/// The configuration file Cargo would have read from the checkout, were it trusted:
+/// the nearest one between the working directory and the workspace root.
+fn unread_config(workspace_root: &Path) -> Option<PathBuf> {
+    let cwd = env::current_dir().ok()?;
+    cwd.ancestors()
+        .take_while(|directory| directory.starts_with(workspace_root))
+        .flat_map(|directory| {
+            ["config.toml", "config"].map(|name| directory.join(".cargo").join(name))
+        })
+        .find(|config| config.is_file())
+}
+
+/// With a lock, leaving a `[patch]` or source replacement unread makes Cargo
+/// fail. Without one it resolves a different graph and says nothing, so say it.
+fn warn_about_unread_config(config: Option<&Path>, locked: bool) -> Result<(), String> {
+    match config {
+        Some(config) if !locked => annotation(
+            "warning",
+            &format!(
+                "{} is not read because trust_cargo_config is false, and without a Cargo.lock a [patch] or source replacement defined there is silently not applied. Set trust_cargo_config: true if this checkout is trusted.",
+                config.display()
+            ),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Point a Cargo failure at the configuration it was not allowed to read.
+fn blame_unread_config(error: String, config: Option<&Path>) -> String {
+    match config {
+        Some(config) => format!(
+            "{error}. {} was not read because trust_cargo_config is false; set trust_cargo_config: true if this checkout is trusted and Cargo needs that configuration.",
+            config.display()
+        ),
+        None => error,
+    }
 }
 
 /// The JSON document printed by `cargo metadata`.
@@ -185,11 +225,16 @@ fn load_graph(trust_cargo_config: bool) -> Result<WorkspaceGraph, String> {
         Some(root)
     };
     let manifest = workspace_manifest(&mut locate)?;
-    if let Some(neutral) = neutral {
+    let unread = if let Some(neutral) = neutral {
         metadata.manifest_path(&manifest).current_dir(neutral);
-    }
-    respect_lock(&mut metadata, &manifest)?;
-    let json = resolved_metadata(&metadata)?;
+        manifest.parent().and_then(unread_config)
+    } else {
+        None
+    };
+    let locked = respect_lock(&mut metadata, &manifest)?;
+    warn_about_unread_config(unread.as_deref(), locked)?;
+    let json = resolved_metadata(&metadata)
+        .map_err(|error| blame_unread_config(error, unread.as_deref()))?;
     WorkspaceGraph::from_json(&json).map_err(|error| error.to_string())
 }
 

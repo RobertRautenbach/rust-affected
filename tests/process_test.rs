@@ -243,6 +243,95 @@ fn repository_cargo_config_is_read_only_when_trusted() {
 }
 
 #[test]
+fn a_cargo_failure_names_the_unread_repository_config() {
+    let patched = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/patch-config");
+    let changed = ("CHANGED_FILES_JSON", r#"["core/src/lib.rs"]"#);
+    let trusted = run(&patched, &[changed, ("TRUST_CARGO_CONFIG", "true")]);
+    assert!(trusted.status.success());
+    assert_eq!(String::from_utf8_lossy(&trusted.stderr), "");
+    // The [patch] lives only in .cargo/config.toml; without it the lock is stale.
+    let output = run(&patched, &[changed]);
+    assert_error(&output, "cargo metadata failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            ".cargo/config.toml was not read because trust_cargo_config is false; set trust_cargo_config: true if this checkout is trusted and Cargo needs that configuration."
+        ),
+        "{stderr}"
+    );
+    // With no configuration to blame, the failure is reported as it is.
+    let scratch = workspace();
+    std::fs::write(scratch.path().join("Cargo.lock"), "version = 4\n").unwrap();
+    let output = run(scratch.path(), &[CHANGED_MEMBER]);
+    assert_error(&output, "cargo metadata failed");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("trust_cargo_config"));
+}
+
+#[test]
+fn an_unread_repository_config_without_a_lock_is_warned_about() {
+    // Without a lock, ignoring a [patch] or source replacement changes the
+    // resolved graph instead of failing, so the unread file must be named.
+    let lock_warning = "::warning::No Cargo.lock in the workspace root;";
+    let config_warning = "is not read because trust_cargo_config is false, and without a Cargo.lock a [patch] or source replacement defined there is silently not applied. Set trust_cargo_config: true if this checkout is trusted.";
+    for (config, directory) in [
+        (".cargo/config.toml", ""),
+        (".cargo/config", ""),
+        ("member/.cargo/config.toml", "member"),
+        (".cargo/config.toml", "member"),
+    ] {
+        let scratch = workspace();
+        let config_path = scratch.path().join(config);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "[net]\nretry = 1\n").unwrap();
+        let cwd = scratch.path().join(directory);
+        let lock = scratch.path().join("Cargo.lock");
+
+        let output = run(&cwd, &[CHANGED_MEMBER]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        let lines: Vec<_> = stderr.lines().collect();
+        assert_eq!(lines.len(), 2, "{stderr}");
+        assert!(lines[0].starts_with(lock_warning), "{stderr}");
+        assert!(
+            lines[1].starts_with("::warning::")
+                && lines[1].contains(config)
+                && lines[1].ends_with(config_warning),
+            "{stderr}"
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), MEMBER_OUTPUT);
+
+        // Trusted, the file is read, so only the missing lock is reported.
+        std::fs::remove_file(&lock).unwrap();
+        let output = run(&cwd, &[CHANGED_MEMBER, ("TRUST_CARGO_CONFIG", "true")]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(stderr.starts_with(lock_warning), "{stderr}");
+
+        // With a lock, a difference in resolution fails instead: nothing to say.
+        let output = run(&cwd, &[CHANGED_MEMBER]);
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), MEMBER_OUTPUT);
+    }
+    // A configuration file outside the workspace is not the repository's.
+    let outer = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outer.path().join(".cargo")).unwrap();
+    std::fs::write(outer.path().join(".cargo/config.toml"), "").unwrap();
+    let inner = outer.path().join("checkout");
+    std::fs::create_dir_all(inner.join("src")).unwrap();
+    std::fs::write(
+        inner.join("Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(inner.join("src/lib.rs"), "").unwrap();
+    let output = run(&inner, &[("CHANGED_FILES_JSON", r#"["src/lib.rs"]"#)]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.starts_with(lock_warning), "{stderr}");
+}
+
+#[test]
 fn trust_cargo_config_requires_a_boolean_and_isolation_a_manifest() {
     for value in ["1", "yes", "TRUE", "True", " true"] {
         assert_error(
