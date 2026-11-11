@@ -66,7 +66,7 @@ outputs:
 
 runs:
   using: docker
-  image: 'docker://ghcr.io/robertrautenbach/rust-affected:v4.3.3@sha256:db918ae77cf7bc65cf2d1d2d0f8687b2ac4a3ab7541fc5ce28922763069c0ca8'
+  image: 'docker://ghcr.io/robertrautenbach/rust-affected:v4.4.0@sha256:bd9448a2b5a2bb8578c1422c10847ecb9a5b53af0416cc724fa19c3ca21912f2'
   env:
     CHANGED_FILES: ${{ inputs.changed_files }}
     FORCE_TRIGGERS: ${{ inputs.force_triggers }}
