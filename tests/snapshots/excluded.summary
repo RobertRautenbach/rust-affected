@@ -7,11 +7,11 @@ existing summary
 | **Affected libraries** |  |
 | **Affected binaries** | `root-app` |
 
-### Changed crates
+### Changed packages
 _none_
 
-### Affected library members
+### Affected libraries
 _none_
 
-### Affected binary members
+### Affected binaries
 - `root-app`

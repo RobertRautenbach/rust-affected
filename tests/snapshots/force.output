@@ -1,4 +1,4 @@
-changed_crates=["root-app"]
-affected_library_members=["independent-lib","sub-lib"]
-affected_binary_members=["root-app"]
+changed_packages=["root-app"]
+affected_libraries=["independent-lib","sub-lib"]
+affected_binaries=["root-app"]
 force_all=true

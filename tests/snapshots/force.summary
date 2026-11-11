@@ -10,12 +10,12 @@ existing summary
 | **Affected libraries** | `independent-lib` `sub-lib` |
 | **Affected binaries** | `root-app` |
 
-### Changed crates
+### Changed packages
 - `root-app`
 
-### Affected library members
+### Affected libraries
 - `independent-lib`
 - `sub-lib`
 
-### Affected binary members
+### Affected binaries
 - `root-app`

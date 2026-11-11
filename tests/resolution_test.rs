@@ -68,13 +68,9 @@ fn cargo_selected_identities_control_affected_members() {
             &HashSet::<String>::new(),
         )
         .unwrap();
-        assert_eq!(result.changed_crates, ["resolution-core"], "{layout}");
-        assert_eq!(
-            result.affected_library_members,
-            ["resolution-core"],
-            "{layout}"
-        );
-        assert_eq!(result.affected_binary_members, binaries, "{layout}");
+        assert_eq!(result.changed_packages, ["resolution-core"], "{layout}");
+        assert_eq!(result.affected_libraries, ["resolution-core"], "{layout}");
+        assert_eq!(result.affected_binaries, binaries, "{layout}");
         let excluded = compute_affected(
             &graph,
             &["core/src/lib.rs".into()],
@@ -82,9 +78,9 @@ fn cargo_selected_identities_control_affected_members() {
             &HashSet::from(["resolution-core".into()]),
         )
         .unwrap();
-        assert_eq!(excluded.changed_crates, Vec::<String>::new());
-        assert_eq!(excluded.affected_library_members, Vec::<String>::new());
-        assert_eq!(excluded.affected_binary_members, binaries, "{layout}");
+        assert_eq!(excluded.changed_packages, Vec::<String>::new());
+        assert_eq!(excluded.affected_libraries, Vec::<String>::new());
+        assert_eq!(excluded.affected_binaries, binaries, "{layout}");
         // Each independent binary is also a change origin: traversal must not run forwards.
         for binary in if layout == "bridge" {
             vec!["app", "second"]
@@ -98,9 +94,9 @@ fn cargo_selected_identities_control_affected_members() {
                 &HashSet::<String>::new(),
             )
             .unwrap();
-            assert_eq!(result.changed_crates, [binary]);
-            assert_eq!(result.affected_binary_members, [binary]);
-            assert_eq!(result.affected_library_members, Vec::<String>::new());
+            assert_eq!(result.changed_packages, [binary]);
+            assert_eq!(result.affected_binaries, [binary]);
+            assert_eq!(result.affected_libraries, Vec::<String>::new());
         }
         let forced = compute_affected(
             &graph,
@@ -109,9 +105,9 @@ fn cargo_selected_identities_control_affected_members() {
             &HashSet::from(["app".into()]),
         )
         .unwrap();
-        assert_eq!(forced.affected_library_members, ["resolution-core"]);
+        assert_eq!(forced.affected_libraries, ["resolution-core"]);
         assert_eq!(
-            forced.affected_binary_members,
+            forced.affected_binaries,
             if layout == "bridge" {
                 vec!["second"]
             } else {
@@ -134,13 +130,9 @@ fn non_member_path_packages_own_their_files_without_being_reported() {
     ] {
         let result =
             compute_affected(&graph, &[file.into()], &[], &HashSet::<String>::new()).unwrap();
-        assert_eq!(result.changed_crates, Vec::<String>::new(), "{file}");
-        assert_eq!(
-            result.affected_library_members,
-            Vec::<String>::new(),
-            "{file}"
-        );
-        assert_eq!(result.affected_binary_members, binaries, "{file}");
+        assert_eq!(result.changed_packages, Vec::<String>::new(), "{file}");
+        assert_eq!(result.affected_libraries, Vec::<String>::new(), "{file}");
+        assert_eq!(result.affected_binaries, binaries, "{file}");
         assert_eq!(result.warnings, [], "{file}");
     }
     // A directory that merely contains such packages owns nothing.
@@ -151,7 +143,7 @@ fn non_member_path_packages_own_their_files_without_being_reported() {
         &HashSet::<String>::new(),
     )
     .unwrap();
-    assert_eq!(result.affected_binary_members, Vec::<String>::new());
+    assert_eq!(result.affected_binaries, Vec::<String>::new());
     // Exclusions still filter the reported members only.
     let result = compute_affected(
         &graph,
@@ -160,7 +152,7 @@ fn non_member_path_packages_own_their_files_without_being_reported() {
         &HashSet::from(["app".into()]),
     )
     .unwrap();
-    assert_eq!(result.affected_binary_members, ["second"]);
+    assert_eq!(result.affected_binaries, ["second"]);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-changed_crates=[]
-affected_library_members=[]
-affected_binary_members=[]
+changed_packages=[]
+affected_libraries=[]
+affected_binaries=[]
 force_all=false

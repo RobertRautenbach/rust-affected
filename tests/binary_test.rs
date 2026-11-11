@@ -24,7 +24,7 @@ fn run_binary(envs: &[(&str, &str)]) -> (String, bool) {
     cmd.env_remove("GITHUB_STEP_SUMMARY");
     cmd.env_remove("CHANGED_FILES_JSON");
     cmd.env_remove("FORCE_TRIGGERS");
-    cmd.env_remove("EXCLUDED_MEMBERS");
+    cmd.env_remove("EXCLUDED_PACKAGES");
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -47,7 +47,7 @@ fn env_changed_files_json_array() {
     )]);
     assert!(ok);
     let json = parse_json(&stdout);
-    let changed: Vec<String> = serde_json::from_value(json["changed_crates"].clone()).unwrap();
+    let changed: Vec<String> = serde_json::from_value(json["changed_packages"].clone()).unwrap();
     assert_eq!(changed, vec!["lib-standalone", "lib-utils"]);
 }
 
@@ -56,9 +56,9 @@ fn env_changed_files_empty_array() {
     let (stdout, ok) = run_binary(&[("CHANGED_FILES_JSON", "[]")]);
     assert!(ok);
     let json = parse_json(&stdout);
-    assert_eq!(json["changed_crates"], Value::Array(vec![]));
-    assert_eq!(json["affected_library_members"], Value::Array(vec![]));
-    assert_eq!(json["affected_binary_members"], Value::Array(vec![]));
+    assert_eq!(json["changed_packages"], Value::Array(vec![]));
+    assert_eq!(json["affected_libraries"], Value::Array(vec![]));
+    assert_eq!(json["affected_binaries"], Value::Array(vec![]));
     assert_eq!(json["force_all"], false);
 }
 
@@ -142,48 +142,45 @@ fn env_force_triggers_glob_pattern() {
     assert_eq!(json["force_all"], true);
 }
 
-// ── EXCLUDED_MEMBERS parsing ────────────────────────────────────────
+// ── EXCLUDED_PACKAGES parsing ────────────────────────────────────────
 
 #[test]
-fn env_excluded_members_space_separated() {
+fn env_excluded_packages_space_separated() {
     let (stdout, ok) = run_binary(&[
         ("CHANGED_FILES_JSON", r#"["lib-utils/src/lib.rs"]"#),
-        ("EXCLUDED_MEMBERS", "lib-core app-alpha"),
+        ("EXCLUDED_PACKAGES", "lib-core app-alpha"),
     ]);
     assert!(ok);
     let json = parse_json(&stdout);
-    let affected: Vec<String> =
-        serde_json::from_value(json["affected_library_members"].clone()).unwrap();
+    let affected: Vec<String> = serde_json::from_value(json["affected_libraries"].clone()).unwrap();
     assert!(!affected.contains(&"lib-core".to_string()));
     assert!(!affected.contains(&"app-alpha".to_string()));
     assert!(affected.contains(&"lib-utils".to_string()));
-    // app-beta is a binary crate — it must not appear in affected_library_members
+    // app-beta is a binary crate — it must not appear in affected_libraries
     assert!(!affected.contains(&"app-beta".to_string()));
 }
 
 #[test]
-fn env_excluded_members_newline_separated() {
+fn env_excluded_packages_newline_separated() {
     let (stdout, ok) = run_binary(&[
         ("CHANGED_FILES_JSON", r#"["lib-utils/src/lib.rs"]"#),
-        ("EXCLUDED_MEMBERS", "lib-core\napp-alpha"),
+        ("EXCLUDED_PACKAGES", "lib-core\napp-alpha"),
     ]);
     assert!(ok);
     let json = parse_json(&stdout);
-    let affected: Vec<String> =
-        serde_json::from_value(json["affected_library_members"].clone()).unwrap();
+    let affected: Vec<String> = serde_json::from_value(json["affected_libraries"].clone()).unwrap();
     assert!(!affected.contains(&"lib-core".to_string()));
     assert!(!affected.contains(&"app-alpha".to_string()));
 }
 
 #[test]
-fn env_excluded_members_unset_means_no_exclusions() {
+fn env_excluded_packages_unset_means_no_exclusions() {
     let (stdout, ok) = run_binary(&[("CHANGED_FILES_JSON", r#"["lib-utils/src/lib.rs"]"#)]);
     assert!(ok);
     let json = parse_json(&stdout);
-    let affected: Vec<String> =
-        serde_json::from_value(json["affected_library_members"].clone()).unwrap();
+    let affected: Vec<String> = serde_json::from_value(json["affected_libraries"].clone()).unwrap();
     assert!(affected.contains(&"lib-core".to_string()));
-    // app-alpha is a binary crate — it must not appear in affected_library_members
+    // app-alpha is a binary crate — it must not appear in affected_libraries
     assert!(!affected.contains(&"app-alpha".to_string()));
 }
 
@@ -203,13 +200,13 @@ fn env_github_output_writes_to_file() {
     assert!(ok);
     let contents = std::fs::read_to_string(&tmp).unwrap();
     assert_eq!(stdout, contents);
-    assert!(contents.contains("changed_crates="));
-    assert!(contents.contains("affected_library_members="));
-    assert!(contents.contains("affected_binary_members="));
+    assert!(contents.contains("changed_packages="));
+    assert!(contents.contains("affected_libraries="));
+    assert!(contents.contains("affected_binaries="));
     assert!(contents.contains("force_all="));
     // Verify the values are valid JSON arrays
     for line in contents.lines() {
-        if let Some(value) = line.strip_prefix("changed_crates=") {
+        if let Some(value) = line.strip_prefix("changed_packages=") {
             let parsed: Vec<String> = serde_json::from_str(value).unwrap();
             assert_eq!(parsed, vec!["app-alpha"]);
         }
@@ -232,7 +229,7 @@ fn env_github_output_appends_to_existing_content() {
     // Existing content is preserved
     assert!(contents.starts_with("existing_key=existing_value\n"));
     // New content appended
-    assert!(contents.contains("changed_crates="));
+    assert!(contents.contains("changed_packages="));
 }
 
 // ── JSON stdout output (no GITHUB_OUTPUT) ───────────────────────────
@@ -243,14 +240,14 @@ fn stdout_json_contains_all_fields() {
     assert!(ok);
     let json = parse_json(&stdout);
     // All four keys present
-    assert!(json.get("changed_crates").is_some());
-    assert!(json.get("affected_library_members").is_some());
-    assert!(json.get("affected_binary_members").is_some());
+    assert!(json.get("changed_packages").is_some());
+    assert!(json.get("affected_libraries").is_some());
+    assert!(json.get("affected_binaries").is_some());
     assert!(json.get("force_all").is_some());
     // Types are correct
-    assert!(json["changed_crates"].is_array());
-    assert!(json["affected_library_members"].is_array());
-    assert!(json["affected_binary_members"].is_array());
+    assert!(json["changed_packages"].is_array());
+    assert!(json["affected_libraries"].is_array());
+    assert!(json["affected_binaries"].is_array());
     assert!(json["force_all"].is_boolean());
 }
 
@@ -264,25 +261,23 @@ fn all_env_vars_together() {
             r#"["lib-utils/src/lib.rs","infra/deploy.yml"]"#,
         ),
         ("FORCE_TRIGGERS", "infra/"),
-        ("EXCLUDED_MEMBERS", "app-alpha lib-core-ext"),
+        ("EXCLUDED_PACKAGES", "app-alpha lib-core-ext"),
     ]);
     assert!(ok);
     let json = parse_json(&stdout);
 
     assert_eq!(json["force_all"], true);
 
-    let changed: Vec<String> = serde_json::from_value(json["changed_crates"].clone()).unwrap();
+    let changed: Vec<String> = serde_json::from_value(json["changed_packages"].clone()).unwrap();
     assert_eq!(changed, vec!["lib-utils"]);
 
-    let affected: Vec<String> =
-        serde_json::from_value(json["affected_library_members"].clone()).unwrap();
+    let affected: Vec<String> = serde_json::from_value(json["affected_libraries"].clone()).unwrap();
     assert!(!affected.contains(&"app-alpha".to_string()));
     assert!(!affected.contains(&"lib-core-ext".to_string()));
     assert!(affected.contains(&"lib-core".to_string()));
-    // app-beta is a binary crate — it must not appear in affected_library_members
+    // app-beta is a binary crate — it must not appear in affected_libraries
     assert!(!affected.contains(&"app-beta".to_string()));
 
-    let binaries: Vec<String> =
-        serde_json::from_value(json["affected_binary_members"].clone()).unwrap();
+    let binaries: Vec<String> = serde_json::from_value(json["affected_binaries"].clone()).unwrap();
     assert_eq!(binaries, vec!["app-beta", "tool-alpha"]);
 }

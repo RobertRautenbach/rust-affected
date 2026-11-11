@@ -34,7 +34,7 @@ snapshot() {
   find "$1" -type f -exec cksum {} + | LC_ALL=C sort
 }
 
-# run_case NAME WORKSPACE CHANGED_FILES_JSON FORCE_TRIGGERS EXCLUDED_MEMBERS EXPECTED_GITHUB_OUTPUT [docker run args...]
+# run_case NAME WORKSPACE CHANGED_FILES_JSON FORCE_TRIGGERS EXCLUDED_PACKAGES EXPECTED_GITHUB_OUTPUT [docker run args...]
 run_case() {
   local name="$1" workspace="$2" changed="$3" force="$4" excluded="$5" expected="$6"
   shift 6
@@ -57,7 +57,7 @@ run_case() {
     -e GITHUB_STEP_SUMMARY=/github/file_commands/step_summary \
     -e "CHANGED_FILES_JSON=${changed}" \
     -e "FORCE_TRIGGERS=${force}" \
-    -e "EXCLUDED_MEMBERS=${excluded}" \
+    -e "EXCLUDED_PACKAGES=${excluded}" \
     ${1+"$@"} \
     "${IMAGE}" 2>"${tmp}/stderr")" || rc=$?
 
@@ -97,7 +97,7 @@ run_failing_case() {
     -v "${workspace}:/github/workspace" -v "${tmp}:/github/file_commands" \
     -e HOME=/github/home -e CARGO_HOME=/github/cargo-home -e CARGO_NET_OFFLINE=true -e GITHUB_OUTPUT=/github/file_commands/set_output \
     -e GITHUB_STEP_SUMMARY=/github/file_commands/step_summary \
-    -e "CHANGED_FILES_JSON=${changed}" -e "FORCE_TRIGGERS=${force}" -e "EXCLUDED_MEMBERS=${excluded}" \
+    -e "CHANGED_FILES_JSON=${changed}" -e "FORCE_TRIGGERS=${force}" -e "EXCLUDED_PACKAGES=${excluded}" \
     ${1+"$@"} "${IMAGE}" >"${tmp}/stdout" 2>"${tmp}/stderr" || rc=$?
   if [[ "${rc}" -ne 1 ]] || [[ -s "${tmp}/stdout" ]] || [[ -s "${tmp}/set_output" ]] || [[ -s "${tmp}/step_summary" ]]; then
     cat "${tmp}/stderr" >&2
@@ -151,58 +151,58 @@ docker run --rm --network none --entrypoint sh "${IMAGE}" -c \
 
 run_case "leaf library change" "${FIXTURE}" \
   '["lib-utils/src/lib.rs"]' "" "" \
-'changed_crates=["lib-utils"]
-affected_library_members=["lib-core","lib-core-ext","lib-utils"]
-affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+'changed_packages=["lib-utils"]
+affected_libraries=["lib-core","lib-core-ext","lib-utils"]
+affected_binaries=["app-alpha","app-beta","tool-alpha"]
 force_all=false'
 
 run_case "force trigger" "${FIXTURE}" \
   '["Cargo.lock"]' "Cargo.lock" "" \
-'changed_crates=[]
-affected_library_members=["lib-core","lib-core-ext","lib-standalone","lib-utils","lib-with-tests"]
-affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+'changed_packages=[]
+affected_libraries=["lib-core","lib-core-ext","lib-standalone","lib-utils","lib-with-tests"]
+affected_binaries=["app-alpha","app-beta","tool-alpha"]
 force_all=true'
 
 run_case "directory-only force trigger" "${FIXTURE}" \
   '["infra/"]' "infra/" "" \
-'changed_crates=[]
-affected_library_members=["lib-core","lib-core-ext","lib-standalone","lib-utils","lib-with-tests"]
-affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+'changed_packages=[]
+affected_libraries=["lib-core","lib-core-ext","lib-standalone","lib-utils","lib-with-tests"]
+affected_binaries=["app-alpha","app-beta","tool-alpha"]
 force_all=true'
 
 run_case "path-prefix exclusion" "${FIXTURE}" \
   '["lib-utils/src/lib.rs"]' "" "tools/" \
-'changed_crates=["lib-utils"]
-affected_library_members=["lib-core","lib-core-ext","lib-utils"]
-affected_binary_members=["app-alpha","app-beta"]
+'changed_packages=["lib-utils"]
+affected_libraries=["lib-core","lib-core-ext","lib-utils"]
+affected_binaries=["app-alpha","app-beta"]
 force_all=false'
 
 EXPECTED_ANNOTATIONS="${EMPTY_WARNING}" run_case "no changed files" "${FIXTURE}" \
   '[]' "" "" \
-'changed_crates=[]
-affected_library_members=[]
-affected_binary_members=[]
+'changed_packages=[]
+affected_libraries=[]
+affected_binaries=[]
 force_all=false'
 
 run_case "root member ownership" "${REPO_ROOT}/tests/fixtures/root-package" \
   '["sub-lib/src/lib.rs"]' "" "" \
-'changed_crates=["sub-lib"]
-affected_library_members=["sub-lib"]
-affected_binary_members=["root-app"]
+'changed_packages=["sub-lib"]
+affected_libraries=["sub-lib"]
+affected_binaries=["root-app"]
 force_all=false'
 
 run_case "independent nested member" "${REPO_ROOT}/tests/fixtures/nested-package" \
   '["parent/independent/src/lib.rs"]' "" "" \
-'changed_crates=["independent"]
-affected_library_members=["independent"]
-affected_binary_members=[]
+'changed_packages=["independent"]
+affected_libraries=["independent"]
+affected_binaries=[]
 force_all=false'
 
 run_case "normalized changed path" "${FIXTURE}" \
   '["./lib-utils/src/lib.rs"]' "" "" \
-'changed_crates=["lib-utils"]
-affected_library_members=["lib-core","lib-core-ext","lib-utils"]
-affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+'changed_packages=["lib-utils"]
+affected_libraries=["lib-core","lib-core-ext","lib-utils"]
+affected_binaries=["app-alpha","app-beta","tool-alpha"]
 force_all=false'
 
 EMPTY_WS="$(mktemp -d "${TMP_PARENT}/rust-affected-empty.XXXXXX")"
@@ -212,18 +212,18 @@ rm -rf "${EMPTY_WS}"
 run_failing_case "invalid glob" "${FIXTURE}" '["x"]' "[abc" "" 'invalid force_triggers pattern'
 EXPECTED_ANNOTATIONS="${EMPTY_WARNING}" run_failing_case "empty invalid glob" "${FIXTURE}" '[]' "[abc" "" 'invalid force_triggers pattern'
 
-EXPECTED_ANNOTATIONS='::warning::excluded_members entries matched no workspace member: ["tools"]. Names match crate names exactly; use a trailing slash such as '"'"'tools/'"'"' to match a directory.' \
+EXPECTED_ANNOTATIONS='::warning::excluded_packages entries matched no workspace package: ["tools"]. Names match package names exactly; use a trailing slash such as '"'"'tools/'"'"' to match a directory.' \
 run_case "unmatched exclusion" "${FIXTURE}" '["app-alpha/src/main.rs"]' "" "tools" \
-'changed_crates=["app-alpha"]
-affected_library_members=[]
-affected_binary_members=["app-alpha"]
+'changed_packages=["app-alpha"]
+affected_libraries=[]
+affected_binaries=["app-alpha"]
 force_all=false'
 
 EXPECTED_ANNOTATIONS='::warning::1 changed file(s) were ignored for attribution and force triggers: ["../x"]. Use paths relative to the workspace root or absolute paths beneath it; empty paths and '"'"'..'"'"' are not supported.' \
 run_case "unusable path cannot force" "${FIXTURE}" '["../x"]' "**" "" \
-'changed_crates=[]
-affected_library_members=[]
-affected_binary_members=[]
+'changed_packages=[]
+affected_libraries=[]
+affected_binaries=[]
 force_all=false'
 
 # The list is required and must be a JSON array of strings. The input removed
@@ -238,23 +238,23 @@ run_failing_case "unmatchable trigger" "${FIXTURE}" '["x"]' "/Cargo.lock" "" 'ca
 
 run_case "path with a space and non-ASCII characters" "${FIXTURE}" \
   '["lib-utils/src/my café file.rs"]' "" "" \
-'changed_crates=["lib-utils"]
-affected_library_members=["lib-core","lib-core-ext","lib-utils"]
-affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+'changed_packages=["lib-utils"]
+affected_libraries=["lib-core","lib-core-ext","lib-utils"]
+affected_binaries=["app-alpha","app-beta","tool-alpha"]
 force_all=false'
 
 EXPECTED_ANNOTATIONS='::warning::workspace-wide files changed but belong to no package and matched no force trigger, so nothing was selected for them: ["Cargo.lock"]. They can affect every package; add them to force_triggers.' \
 run_case "uncovered workspace-wide file" "${FIXTURE}" '["Cargo.lock"]' "" "" \
-'changed_crates=[]
-affected_library_members=[]
-affected_binary_members=[]
+'changed_packages=[]
+affected_libraries=[]
+affected_binaries=[]
 force_all=false'
 
 run_case "non-member path dependency owns its files" "${REPO_ROOT}/tests/fixtures/bridge" \
   '["external/adapter/src/lib.rs"]' "" "" \
-'changed_crates=[]
-affected_library_members=[]
-affected_binary_members=["app"]
+'changed_packages=[]
+affected_libraries=[]
+affected_binaries=["app"]
 force_all=false'
 
 copy_fixture() {
@@ -277,9 +277,9 @@ copy_fixture "${MISSING_LOCK_WS}"
 rm "${MISSING_LOCK_WS}/Cargo.lock"
 missing_before="$(snapshot "${MISSING_LOCK_WS}")"
 EXPECTED_ANNOTATIONS="${LOCK_WARNING}" run_case "missing lock" "${MISSING_LOCK_WS}" '["app-alpha/src/main.rs"]' "" "" \
-'changed_crates=["app-alpha"]
-affected_library_members=[]
-affected_binary_members=["app-alpha"]
+'changed_packages=["app-alpha"]
+affected_libraries=[]
+affected_binaries=["app-alpha"]
 force_all=false'
 [[ -f "${MISSING_LOCK_WS}/Cargo.lock" ]] || fail "missing-lock fallback did not create a lockfile"
 mv "${MISSING_LOCK_WS}/Cargo.lock" "${TMP_PARENT}/created.lock"
@@ -289,9 +289,9 @@ copy_fixture "${EMPTY_LOCK_WS}"
 rm "${EMPTY_LOCK_WS}/Cargo.lock"
 empty_before="$(snapshot "${EMPTY_LOCK_WS}")"
 EXPECTED_ANNOTATIONS="${EMPTY_WARNING}"$'\n'"${LOCK_WARNING}" run_case "empty input with missing lock" "${EMPTY_LOCK_WS}" '[]' "" "" \
-'changed_crates=[]
-affected_library_members=[]
-affected_binary_members=[]
+'changed_packages=[]
+affected_libraries=[]
+affected_binaries=[]
 force_all=false' --workdir /github/workspace/app-alpha
 [[ -f "${EMPTY_LOCK_WS}/Cargo.lock" ]] || fail "empty input did not create a lockfile"
 mv "${EMPTY_LOCK_WS}/Cargo.lock" "${TMP_PARENT}/empty-created.lock"
@@ -314,9 +314,9 @@ for fixture in patch-selected patch-config patch-unused bridge; do
   trust=false
   [[ "${fixture}" != patch-config ]] || trust=true
   run_case "resolved ${fixture}" "${REPO_ROOT}/tests/fixtures/${fixture}" '["core/src/lib.rs"]' "" "" \
-"changed_crates=[\"resolution-core\"]
-affected_library_members=[\"resolution-core\"]
-affected_binary_members=${binaries}
+"changed_packages=[\"resolution-core\"]
+affected_libraries=[\"resolution-core\"]
+affected_binaries=${binaries}
 force_all=false" -e "TRUST_CARGO_CONFIG=${trust}"
 done
 # Untrusted, that [patch] is unread, the lock is stale, and the error names the file.
@@ -331,18 +331,18 @@ mkdir -p "${TOOLCHAIN_WS}/target"
 printf '{"rustc_fingerprint":0,"outputs":{},"successes":{}}' > "${TOOLCHAIN_WS}/target/.rustc_info.json"
 toolchain_before="$(snapshot "${TOOLCHAIN_WS}")"
 run_case "consumer toolchain ignored offline" "${TOOLCHAIN_WS}" '["lib-utils/src/lib.rs"]' "" "" \
-'changed_crates=["lib-utils"]
-affected_library_members=["lib-core","lib-core-ext","lib-utils"]
-affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+'changed_packages=["lib-utils"]
+affected_libraries=["lib-core","lib-core-ext","lib-utils"]
+affected_binaries=["app-alpha","app-beta","tool-alpha"]
 force_all=false' \
   -e TRUST_CARGO_CONFIG=true
 run_failing_case "unpinned toolchain fails without installing" "${TOOLCHAIN_WS}" '["lib-utils/src/lib.rs"]' "" "" 'is not installed' \
   -e RUSTUP_TOOLCHAIN= -e TRUST_CARGO_CONFIG=true
 # Started outside the checkout, rustup cannot see the toolchain file either.
 run_case "toolchain file unread when the checkout is untrusted" "${TOOLCHAIN_WS}" '["lib-utils/src/lib.rs"]' "" "" \
-'changed_crates=["lib-utils"]
-affected_library_members=["lib-core","lib-core-ext","lib-utils"]
-affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+'changed_packages=["lib-utils"]
+affected_libraries=["lib-core","lib-core-ext","lib-utils"]
+affected_binaries=["app-alpha","app-beta","tool-alpha"]
 force_all=false' \
   -e RUSTUP_TOOLCHAIN=
 if [[ "${toolchain_before}" != "$(snapshot "${TOOLCHAIN_WS}")" ]]; then
@@ -357,9 +357,9 @@ mkdir -p "${CONFIG_WS}/.cargo"
 printf '#!/bin/sh\ntouch /github/workspace/EXECUTED\nexec rustc "$@"\n' > "${CONFIG_WS}/planted-rustc"
 chmod +x "${CONFIG_WS}/planted-rustc"
 printf '[build]\nrustc = "/github/workspace/planted-rustc"\n' > "${CONFIG_WS}/.cargo/config.toml"
-CONFIG_EXPECTED='changed_crates=["lib-utils"]
-affected_library_members=["lib-core","lib-core-ext","lib-utils"]
-affected_binary_members=["app-alpha","app-beta","tool-alpha"]
+CONFIG_EXPECTED='changed_packages=["lib-utils"]
+affected_libraries=["lib-core","lib-core-ext","lib-utils"]
+affected_binaries=["app-alpha","app-beta","tool-alpha"]
 force_all=false'
 run_case "repository cargo config honoured when trusted" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
   -e TRUST_CARGO_CONFIG=true
@@ -383,9 +383,9 @@ run_failing_case "invalid trust_cargo_config" "${FIXTURE}" '["x"]' "" "" "TRUST_
 make_git_dependency_fixture
 EXPECTED_ANNOTATIONS="${LOCK_WARNING}" run_case "git dependency fetched with the git CLI" "${GITWS}" \
   '["consumer/src/lib.rs"]' "" "" \
-'changed_crates=["consumer"]
-affected_library_members=["consumer"]
-affected_binary_members=[]
+'changed_packages=["consumer"]
+affected_libraries=["consumer"]
+affected_binaries=[]
 force_all=false' \
   -e CARGO_NET_OFFLINE=false -e TRUST_CARGO_CONFIG=true -v "${GITDEP}:/github/gitdep:ro" \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*'
