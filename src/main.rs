@@ -174,53 +174,52 @@ fn load_graph(ignore_cargo_config: bool) -> Result<WorkspaceGraph, String> {
     WorkspaceGraph::from_json(json).map_err(|error| error.to_string())
 }
 
-fn emit_warnings(warnings: &[Warning]) -> Result<(), String> {
-    let mut paths = Vec::new();
-    let mut exclusions = Vec::new();
-    let mut external_targets = Vec::new();
-    let mut uncovered = Vec::new();
+/// Entries of each kind of warning, in the order the kinds are reported.
+fn group_warnings(warnings: &[Warning]) -> [Vec<&str>; 4] {
+    let mut groups: [Vec<&str>; 4] = Default::default();
     for warning in warnings {
-        match warning {
-            Warning::UnusablePath(path) => paths.push(path.as_str()),
-            Warning::UnmatchedExclusion(entry) => exclusions.push(entry.as_str()),
-            Warning::ExternalTarget(member) => external_targets.push(member.as_str()),
-            Warning::UncoveredRootFile(file) => uncovered.push(file.as_str()),
-        }
+        let (group, entry) = match warning {
+            Warning::UnusablePath(path) => (0, path),
+            Warning::UnmatchedExclusion(entry) => (1, entry),
+            Warning::ExternalTarget(member) => (2, member),
+            Warning::UncoveredRootFile(file) => (3, file),
+        };
+        groups[group].push(entry.as_str());
     }
-    if !paths.is_empty() {
-        annotation(
-            "warning",
-            &format!(
-                "{} changed file(s) were ignored for attribution and force triggers: {paths:?}. Use paths relative to the workspace root or absolute paths beneath it; empty paths and '..' are not supported.",
-                paths.len()
-            ),
-        )?;
+    groups
+}
+
+/// One annotation for a kind of warning, or none when it has no entries.
+fn warn_about(entries: &[&str], message: impl FnOnce() -> String) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
     }
-    if !exclusions.is_empty() {
-        annotation(
-            "warning",
-            &format!(
-                "excluded_members entries matched no workspace member: {exclusions:?}. Names match crate names exactly; use a trailing slash such as 'tools/' to match a directory."
-            ),
-        )?;
-    }
-    if !external_targets.is_empty() {
-        annotation(
-            "warning",
-            &format!(
-                "workspace members declare targets outside their package directories: {external_targets:?}. Changes to those sources may not affect the declaring members. Configure force_triggers for shared source directories within the workspace root; sources outside that root require workflow-level invalidation."
-            ),
-        )?;
-    }
-    if !uncovered.is_empty() {
-        annotation(
-            "warning",
-            &format!(
-                "workspace-wide files changed but belong to no package and matched no force trigger, so nothing was selected for them: {uncovered:?}. They can affect every package; add them to force_triggers."
-            ),
-        )?;
-    }
-    Ok(())
+    annotation("warning", &message())
+}
+
+fn emit_warnings(warnings: &[Warning]) -> Result<(), String> {
+    let [paths, exclusions, external_targets, uncovered] = group_warnings(warnings);
+    warn_about(&paths, || {
+        format!(
+            "{} changed file(s) were ignored for attribution and force triggers: {paths:?}. Use paths relative to the workspace root or absolute paths beneath it; empty paths and '..' are not supported.",
+            paths.len()
+        )
+    })?;
+    warn_about(&exclusions, || {
+        format!(
+            "excluded_members entries matched no workspace member: {exclusions:?}. Names match crate names exactly; use a trailing slash such as 'tools/' to match a directory."
+        )
+    })?;
+    warn_about(&external_targets, || {
+        format!(
+            "workspace members declare targets outside their package directories: {external_targets:?}. Changes to those sources may not affect the declaring members. Configure force_triggers for shared source directories within the workspace root; sources outside that root require workflow-level invalidation."
+        )
+    })?;
+    warn_about(&uncovered, || {
+        format!(
+            "workspace-wide files changed but belong to no package and matched no force trigger, so nothing was selected for them: {uncovered:?}. They can affect every package; add them to force_triggers."
+        )
+    })
 }
 
 fn open_destination(name: &str) -> Result<Option<File>, String> {
