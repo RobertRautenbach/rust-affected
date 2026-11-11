@@ -533,6 +533,20 @@ fn inputs_removed_in_v5_fail_instead_of_being_ignored() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert_eq!(stderr, "");
+    // What the runner really sets for a migrated workflow: names that merely
+    // begin like a removed one, and nothing else.
+    let output = run(
+        &fixture(),
+        &[
+            changed,
+            ("INPUT_CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#),
+            ("INPUT_EXCLUDED_PACKAGES", "tools/"),
+            ("INPUT_TRUST_CARGO_CONFIG", "false"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr, "");
 }
 
 #[test]

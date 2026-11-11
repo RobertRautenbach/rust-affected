@@ -193,8 +193,10 @@ v5 replaces the `changed_files` input with `changed_files_json`, stops reading t
 | Output `affected_library_members` | `affected_libraries` |
 | Output `affected_binary_members` | `affected_binaries` |
 
-Change the step that produces the list to emit JSON, as in the quick start, and rename the input. A workflow that still passes `changed_files` fails with a message naming `changed_files_json`, so it cannot silently select nothing.
+A workflow that still passes `changed_files`, `excluded_members` or `ignore_cargo_config` fails with an error naming the input and its replacement, so nothing is silently ignored.
 
-If your workspace relies on `.cargo/config.toml`, add `trust_cargo_config: true`. When that configuration is needed but unread, Cargo usually fails and the error names the file. Without a committed `Cargo.lock` it may resolve differently instead; the action warns about the unread file in that case. `ignore_cargo_config` no longer exists and has no effect.
+Change the step that produces the list to emit JSON, as in the quick start, and rename the inputs.
 
-The renamed outputs carry the same values as before. Update every `steps.<id>.outputs.<name>` reference: an old output name now yields an empty string, which `fromJSON` rejects. An old `excluded_members` input is ignored, so its packages reappear in the outputs until it is renamed; the runner reports it as an unexpected input.
+If your workspace relies on `.cargo/config.toml`, add `trust_cargo_config: true`. When that configuration is needed but unread, Cargo usually fails and the error names the file. Without a committed `Cargo.lock` it may resolve differently instead; the action warns about the unread file in that case.
+
+The renamed outputs carry the same values as before. Update every `steps.<id>.outputs.<name>` reference: an old output name now yields an empty string, which `fromJSON` rejects.

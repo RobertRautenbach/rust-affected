@@ -229,10 +229,19 @@ force_all=false'
 # The list is required and must be a JSON array of strings. The input removed
 # in v5 is not read, so an unmigrated workflow fails instead of selecting nothing.
 run_failing_case "missing changed_files_json" "${FIXTURE}" "" "" "" 'changed_files_json is required'
-run_failing_case "removed changed_files input" "${FIXTURE}" "" "" "" 'changed_files_json is required' \
+run_failing_case "removed CHANGED_FILES variable is unread" "${FIXTURE}" "" "" "" 'changed_files_json is required' \
   -e CHANGED_FILES=lib-utils/src/lib.rs
 run_failing_case "changed_files_json is not JSON" "${FIXTURE}" "lib-utils/src/lib.rs" "" "" 'must be a JSON array of strings'
 run_failing_case "changed_files_json is not an array of strings" "${FIXTURE}" '["lib-utils/src/lib.rs",1]' "" "" 'must be a JSON array of strings'
+
+# The runner passes every `with:` key as INPUT_<NAME>, declared or not, so a v4
+# workflow's removed inputs must fail instead of being ignored.
+run_failing_case "removed excluded_members input" "${FIXTURE}" '["lib-utils/src/lib.rs"]' "" "" \
+  'inputs removed in v5 were passed: excluded_members \(renamed to excluded_packages\)' \
+  -e INPUT_EXCLUDED_MEMBERS=tools/
+run_failing_case "removed ignore_cargo_config input" "${FIXTURE}" '["lib-utils/src/lib.rs"]' "" "" \
+  'inputs removed in v5 were passed: ignore_cargo_config' \
+  -e INPUT_IGNORE_CARGO_CONFIG=false
 
 run_failing_case "unmatchable trigger" "${FIXTURE}" '["x"]' "/Cargo.lock" "" 'can never match'
 
@@ -371,7 +380,7 @@ run_case "repository cargo config unread by default" "${CONFIG_WS}" '["lib-utils
 run_case "repository cargo config unread from a member" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
   --workdir /github/workspace/app-alpha
 # The switch removed in v5 must not turn the isolation off.
-run_case "removed ignore_cargo_config input" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
+run_case "removed IGNORE_CARGO_CONFIG variable is unread" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
   -e IGNORE_CARGO_CONFIG=false
 [[ "${config_before}" = "$(snapshot "${CONFIG_WS}")" ]] || fail "an untrusted checkout still ran the planted program or changed the workspace"
 run_failing_case "invalid trust_cargo_config" "${FIXTURE}" '["x"]' "" "" "TRUST_CARGO_CONFIG must be" -e TRUST_CARGO_CONFIG=yes
