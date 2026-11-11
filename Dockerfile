@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1.99.0-slim-bookworm AS chef
+FROM --platform=$BUILDPLATFORM rust:1.99.1-slim-bookworm AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
       musl-tools \
       gcc-aarch64-linux-gnu \
