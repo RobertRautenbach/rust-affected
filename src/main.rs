@@ -239,23 +239,25 @@ fn write_destination(writer: &mut impl Write, contents: &str, name: &str) -> Res
         .map_err(|error| format!("failed to write {name}: {error}"))
 }
 
-fn emit_output(result: &AffectedResult) -> Result<(), String> {
+/// The action's historical output order; any other field follows alphabetically.
+fn field_rank(key: &str) -> u8 {
+    match key {
+        "changed_crates" => 0,
+        "affected_library_members" => 1,
+        "affected_binary_members" => 2,
+        "force_all" => 3,
+        _ => 4,
+    }
+}
+
+/// The `key=value` lines for `GITHUB_OUTPUT` and the single-line JSON document.
+fn render_outputs(result: &AffectedResult) -> Result<(String, String), String> {
     let value = serde_json::to_value(result).map_err(|error| error.to_string())?;
     let fields = value
         .as_object()
         .ok_or("affected result must serialize as an object")?;
     let mut fields: Vec<_> = fields.iter().collect();
-    // Preserve the action's historical line order while emitting every serialized field.
-    fields.sort_by_key(|(key, _)| {
-        let order = match key.as_str() {
-            "changed_crates" => 0,
-            "affected_library_members" => 1,
-            "affected_binary_members" => 2,
-            "force_all" => 3,
-            _ => 4,
-        };
-        (order, key.as_str())
-    });
+    fields.sort_by_key(|(key, _)| (field_rank(key), key.as_str()));
     let mut lines = String::new();
     for (key, value) in fields {
         lines.push_str(key);
@@ -264,20 +266,29 @@ fn emit_output(result: &AffectedResult) -> Result<(), String> {
         lines.push('\n');
     }
     // A JSON Value retains the existing alphabetic object-key order.
-    let json = format!("{value}\n");
-    let summary = render_summary(result);
+    Ok((lines, format!("{value}\n")))
+}
+
+fn append(file: &mut Option<File>, contents: &str, name: &str) -> Result<(), String> {
+    match file {
+        Some(file) => write_destination(file, contents, name),
+        None => Ok(()),
+    }
+}
+
+fn emit_output(result: &AffectedResult) -> Result<(), String> {
+    let (lines, json) = render_outputs(result)?;
     // Opening both first avoids publishing results when a destination is invalid.
     let mut output_file = open_destination("GITHUB_OUTPUT")?;
     let mut summary_file = open_destination("GITHUB_STEP_SUMMARY")?;
-    if let Some(file) = &mut output_file {
-        write_destination(file, &lines, "GITHUB_OUTPUT")?;
-    }
-    if let Some(file) = &mut summary_file {
-        write_destination(file, &summary, "GITHUB_STEP_SUMMARY")?;
-    }
+    append(&mut output_file, &lines, "GITHUB_OUTPUT")?;
+    append(
+        &mut summary_file,
+        &render_summary(result),
+        "GITHUB_STEP_SUMMARY",
+    )?;
     let log = if output_file.is_some() { &lines } else { &json };
-    write_destination(&mut io::stdout().lock(), log, "stdout")?;
-    Ok(())
+    write_destination(&mut io::stdout().lock(), log, "stdout")
 }
 
 fn render_summary(result: &AffectedResult) -> String {
