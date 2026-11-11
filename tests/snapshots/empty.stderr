@@ -1,1 +1,1 @@
-::warning::changed_files is empty; no files will be attributed. If files did change, check the step producing changed_files. Workspace and configuration validation still run.
+::warning::changed_files_json is empty; no files will be attributed. If files did change, check the step producing changed_files_json. Workspace and configuration validation still run.

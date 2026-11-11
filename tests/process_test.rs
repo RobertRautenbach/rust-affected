@@ -23,6 +23,11 @@ fn workspace() -> TempDir {
     scratch
 }
 
+/// The JSON array for a whitespace-separated list of paths.
+fn json(files: &str) -> String {
+    serde_json::to_string(&files.split_whitespace().collect::<Vec<_>>()).unwrap()
+}
+
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
 }
@@ -33,10 +38,11 @@ fn command(cwd: &Path) -> Command {
     for key in [
         "GITHUB_OUTPUT",
         "GITHUB_STEP_SUMMARY",
-        "CHANGED_FILES",
-        "FORCE_TRIGGERS",
+        "CHANGED_FILES_JSON",
+        r#"["FORCE_TRIGGERS"]"#,
         "EXCLUDED_MEMBERS",
         "IGNORE_CARGO_CONFIG",
+        "CHANGED_FILES_JSON",
     ] {
         cmd.env_remove(key);
     }
@@ -70,7 +76,7 @@ fn missing_workspace_fails_even_without_changes() {
     let scratch = tempfile::tempdir().unwrap();
     for changed in ["x", ""] {
         assert_error(
-            &run(scratch.path(), &[("CHANGED_FILES", changed)]),
+            &run(scratch.path(), &[("CHANGED_FILES_JSON", &json(changed))]),
             "could not find",
         );
     }
@@ -110,7 +116,7 @@ fn external_targets_warn_without_changing_attribution() {
             let output = run(
                 scratch.path(),
                 &[
-                    ("CHANGED_FILES", changed),
+                    ("CHANGED_FILES_JSON", &json(changed)),
                     ("FORCE_TRIGGERS", trigger),
                     ("EXCLUDED_MEMBERS", excluded),
                 ],
@@ -148,7 +154,10 @@ fn invalid_glob_fails_even_without_changes() {
         assert_error(
             &run(
                 &fixture(),
-                &[("CHANGED_FILES", changed), ("FORCE_TRIGGERS", "[abc")],
+                &[
+                    ("CHANGED_FILES_JSON", &json(changed)),
+                    ("FORCE_TRIGGERS", "[abc"),
+                ],
             ),
             "invalid force_triggers pattern",
         );
@@ -162,7 +171,10 @@ fn unmatchable_trigger_fails_even_without_changes() {
             assert_error(
                 &run(
                     &fixture(),
-                    &[("CHANGED_FILES", changed), ("FORCE_TRIGGERS", trigger)],
+                    &[
+                        ("CHANGED_FILES_JSON", &json(changed)),
+                        ("FORCE_TRIGGERS", trigger),
+                    ],
                 ),
                 "can never match",
             );
@@ -199,7 +211,7 @@ fn ignoring_cargo_config_stops_repository_configured_programs() {
     // By default Cargo honours the checkout's configuration and runs the program.
     for value in [None, Some("false")] {
         let mut cmd = command(scratch.path());
-        cmd.env("CHANGED_FILES", "member/src/lib.rs");
+        cmd.env("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#);
         if let Some(value) = value {
             cmd.env("IGNORE_CARGO_CONFIG", value);
         }
@@ -210,7 +222,7 @@ fn ignoring_cargo_config_stops_repository_configured_programs() {
     // Ignored, from the root and from a member, with identical results.
     for directory in ["", "member"] {
         let output = command(&scratch.path().join(directory))
-            .env("CHANGED_FILES", "member/src/lib.rs")
+            .env("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#)
             .env("IGNORE_CARGO_CONFIG", "true")
             .output()
             .unwrap();
@@ -229,14 +241,17 @@ fn ignoring_cargo_config_stops_repository_configured_programs() {
 #[test]
 fn ignoring_cargo_config_drops_configured_patches_and_fails_closed() {
     let patched = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/patch-config");
-    let honoured = run(&patched, &[("CHANGED_FILES", "core/src/lib.rs")]);
+    let honoured = run(
+        &patched,
+        &[("CHANGED_FILES_JSON", r#"["core/src/lib.rs"]"#)],
+    );
     assert!(honoured.status.success());
     // The [patch] lives only in .cargo/config.toml; without it the lock is stale.
     assert_error(
         &run(
             &patched,
             &[
-                ("CHANGED_FILES", "core/src/lib.rs"),
+                ("CHANGED_FILES_JSON", r#"["core/src/lib.rs"]"#),
                 ("IGNORE_CARGO_CONFIG", "true"),
             ],
         ),
@@ -251,7 +266,7 @@ fn ignore_cargo_config_requires_a_boolean_and_a_manifest() {
             &run(
                 &fixture(),
                 &[
-                    ("CHANGED_FILES", "lib-core/src/lib.rs"),
+                    ("CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#),
                     ("IGNORE_CARGO_CONFIG", value),
                 ],
             ),
@@ -262,7 +277,10 @@ fn ignore_cargo_config_requires_a_boolean_and_a_manifest() {
     assert_error(
         &run(
             scratch.path(),
-            &[("CHANGED_FILES", "x"), ("IGNORE_CARGO_CONFIG", "true")],
+            &[
+                ("CHANGED_FILES_JSON", r#"["x"]"#),
+                ("IGNORE_CARGO_CONFIG", "true"),
+            ],
         ),
         "could not find Cargo.toml",
     );
@@ -272,7 +290,10 @@ fn ignore_cargo_config_requires_a_boolean_and_a_manifest() {
 fn uncovered_workspace_files_warn_without_changing_results() {
     let output = run(
         &fixture(),
-        &[("CHANGED_FILES", "Cargo.lock ./Cargo.toml README.md")],
+        &[(
+            "CHANGED_FILES_JSON",
+            r#"["Cargo.lock","./Cargo.toml","README.md"]"#,
+        )],
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
@@ -288,20 +309,105 @@ fn uncovered_workspace_files_warn_without_changing_results() {
 }
 
 #[test]
+fn json_paths_are_exact_strings() {
+    let scratch = workspace();
+    std::fs::write(scratch.path().join("Cargo.lock"), MEMBER_LOCK).unwrap();
+    // Nothing is split, trimmed or decoded: each element is one path.
+    for files in [
+        r#"["member/src/lib.rs"]"#,
+        r#"["member/src/my file.rs"]"#,
+        r#"["member/src/café.rs"]"#,
+        r#"["member/src/café.rs"]"#,
+        r#"["member/src/a\"b.rs"]"#,
+        r#"["member/src/a\\b.rs"]"#,
+        r#"["member/src/tab\there.rs", "member/src/line\nbreak.rs"]"#,
+        "  [\n  \"member/src/lib.rs\" ,\n  \"member/Cargo.toml\"\n]\n",
+        r#"["README.md", "member/src/lib.rs", "member/src/lib.rs"]"#,
+    ] {
+        let output = run(scratch.path(), &[("CHANGED_FILES_JSON", files)]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{files}: {stderr}");
+        assert_eq!(stderr, "", "{files}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            MEMBER_OUTPUT,
+            "{files}"
+        );
+    }
+}
+
+#[test]
+fn changed_files_json_is_required_and_must_be_an_array_of_strings() {
+    let scratch = workspace();
+    std::fs::write(scratch.path().join("Cargo.lock"), MEMBER_LOCK).unwrap();
+    for envs in [
+        vec![],
+        vec![("CHANGED_FILES_JSON", "")],
+        vec![("CHANGED_FILES_JSON", " \n\t")],
+        // The input removed in v5 is not read.
+        vec![("CHANGED_FILES", "member/src/lib.rs")],
+    ] {
+        assert_error(
+            &run(scratch.path(), &envs),
+            "changed_files_json is required: pass a JSON array of paths, or [] when nothing changed",
+        );
+    }
+    for value in [
+        "member/src/lib.rs",
+        "member/src/lib.rs member/Cargo.toml",
+        r#""member/src/lib.rs""#,
+        r#"{"files":["member/src/lib.rs"]}"#,
+        r#"["member/src/lib.rs", 1]"#,
+        r#"[["member/src/lib.rs"]]"#,
+        "[null]",
+        "null",
+        r#"["member/src/lib.rs"] ["member/Cargo.toml"]"#,
+        r#"["member/src/lib.rs""#,
+        r#"[\"member/src/lib.rs\"]"#,
+    ] {
+        assert_error(
+            &run(scratch.path(), &[("CHANGED_FILES_JSON", value)]),
+            "changed_files_json must be a JSON array of strings",
+        );
+    }
+}
+
+#[test]
+fn an_empty_array_is_valid_and_still_warns() {
+    for value in ["[]", " [ ] "] {
+        let output = run(&fixture(), &[("CHANGED_FILES_JSON", value)]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(
+            stderr.starts_with("::warning::changed_files_json is empty;"),
+            "{stderr}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "{\"affected_binary_members\":[],\"affected_library_members\":[],\"changed_crates\":[],\"force_all\":false}\n"
+        );
+    }
+}
+
+#[test]
 fn warnings_are_grouped_and_do_not_pollute_json() {
     for (envs, messages) in [
-        (vec![], vec!["changed_files is empty"]),
+        (
+            vec![("CHANGED_FILES_JSON", "[]")],
+            vec!["changed_files_json is empty"],
+        ),
         (
             vec![
-                ("CHANGED_FILES", "../x ../x /outside/file"),
+                ("CHANGED_FILES_JSON", r#"["../x","../x","/outside/file"]"#),
                 ("FORCE_TRIGGERS", "**"),
                 ("EXCLUDED_MEMBERS", "tools unknown"),
             ],
             vec!["changed file", "excluded_members"],
         ),
         (
-            vec![("EXCLUDED_MEMBERS", "tools")],
-            vec!["changed_files is empty", "excluded_members"],
+            vec![("CHANGED_FILES_JSON", "[]"), ("EXCLUDED_MEMBERS", "tools")],
+            vec!["changed_files_json is empty", "excluded_members"],
         ),
     ] {
         let output = run(&fixture(), &envs);
@@ -328,10 +434,10 @@ fn warnings_are_grouped_and_do_not_pollute_json() {
 #[test]
 fn every_input_rejects_invalid_utf8_even_without_changes() {
     use std::os::unix::ffi::OsStrExt;
-    for key in ["CHANGED_FILES", "FORCE_TRIGGERS", "EXCLUDED_MEMBERS"] {
+    for key in ["CHANGED_FILES_JSON", "FORCE_TRIGGERS", "EXCLUDED_MEMBERS"] {
         for changed in ["", "lib-core/src/lib.rs"] {
             let output = command(&fixture())
-                .env("CHANGED_FILES", changed)
+                .env("CHANGED_FILES_JSON", json(changed))
                 .env(key, OsStr::from_bytes(b"\xff"))
                 .output()
                 .unwrap();
@@ -345,7 +451,7 @@ fn output_destination_failures_are_errors() {
     let scratch = tempfile::tempdir().unwrap();
     for key in ["GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY"] {
         let output = command(&fixture())
-            .env("CHANGED_FILES", "lib-core/src/lib.rs")
+            .env("CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#)
             .env(key, scratch.path())
             .output()
             .unwrap();
@@ -361,7 +467,7 @@ fn metadata_preserves_existing_compiler_cache() {
     let original = b"{\"rustc_fingerprint\":0,\"outputs\":{},\"successes\":{}}";
     std::fs::write(&cache, original).unwrap();
     let output = command(scratch.path())
-        .env("CHANGED_FILES", "member/src/lib.rs")
+        .env("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#)
         .env("CARGO_TARGET_DIR", scratch.path().join("target"))
         .env("CARGO_CACHE_RUSTC_INFO", "1")
         .output()
@@ -383,7 +489,7 @@ fn stale_locks_fail_without_rewriting_from_root_or_member() {
             std::fs::write(&lock, "version = 4\n").unwrap();
             let output = run(
                 &scratch.path().join(directory),
-                &[("CHANGED_FILES", changed)],
+                &[("CHANGED_FILES_JSON", &json(changed))],
             );
             assert_error(&output, "lock file");
             assert_eq!(std::fs::read_to_string(lock).unwrap(), "version = 4\n");
@@ -398,7 +504,7 @@ fn missing_locks_warn_and_are_created_even_without_changes() {
             let scratch = workspace();
             let output = run(
                 &scratch.path().join(directory),
-                &[("CHANGED_FILES", changed)],
+                &[("CHANGED_FILES_JSON", &json(changed))],
             );
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(output.status.success(), "{stderr}");
@@ -425,7 +531,7 @@ fn valid_locks_are_preserved_without_a_missing_lock_warning() {
     for directory in ["", "member"] {
         let output = run(
             &scratch.path().join(directory),
-            &[("CHANGED_FILES", "member/src/lib.rs")],
+            &[("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#)],
         );
         assert!(
             output.status.success(),
@@ -445,7 +551,7 @@ fn cargo_errors_are_summarized_without_color_and_outputs_are_untouched() {
     std::fs::write(&output_path, "sentinel\n").unwrap();
     std::fs::write(&summary_path, "sentinel\n").unwrap();
     let output = command(scratch.path())
-        .env("CHANGED_FILES", "x")
+        .env("CHANGED_FILES_JSON", r#"["x"]"#)
         .env("CARGO_TERM_COLOR", "always")
         .env("RUSTUP_TERM_COLOR", "always")
         .env("GITHUB_OUTPUT", &output_path)
@@ -479,7 +585,7 @@ fn cargo_config_warning_commands_are_not_forwarded() {
     std::fs::write(&output_path, "").unwrap();
     std::fs::write(&summary_path, "").unwrap();
     let output = command(scratch.path())
-        .env("CHANGED_FILES", "member/src/lib.rs")
+        .env("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#)
         .env("EXCLUDED_MEMBERS", "unknown")
         .env("GITHUB_OUTPUT", &output_path)
         .env("GITHUB_STEP_SUMMARY", &summary_path)
@@ -526,7 +632,7 @@ fn cargo_failure_diagnostic_commands_are_not_forwarded() {
     std::fs::write(&output_path, "sentinel\n").unwrap();
     std::fs::write(&summary_path, "sentinel\n").unwrap();
     let output = command(scratch.path())
-        .env("CHANGED_FILES", "member/src/lib.rs")
+        .env("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#)
         .env("GITHUB_OUTPUT", &output_path)
         .env("GITHUB_STEP_SUMMARY", &summary_path)
         .output()
@@ -543,7 +649,7 @@ fn cargo_failure_diagnostic_commands_are_not_forwarded() {
 fn missing_cargo_executable_is_a_handled_error() {
     let scratch = tempfile::tempdir().unwrap();
     let output = command(&fixture())
-        .env("CHANGED_FILES", "x")
+        .env("CHANGED_FILES_JSON", r#"["x"]"#)
         .env("CARGO", scratch.path().join("missing-cargo"))
         .output()
         .unwrap();
@@ -555,7 +661,10 @@ fn missing_cargo_executable_is_a_handled_error() {
 fn lock_inspection_errors_do_not_enable_unlocked_resolution() {
     let scratch = workspace();
     std::os::unix::fs::symlink("Cargo.lock", scratch.path().join("Cargo.lock")).unwrap();
-    let output = run(scratch.path(), &[("CHANGED_FILES", "member/src/lib.rs")]);
+    let output = run(
+        scratch.path(),
+        &[("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#)],
+    );
     assert_error(&output, "failed to inspect workspace Cargo.lock");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("No Cargo.lock"));
 }
@@ -585,7 +694,7 @@ fn malformed_metadata_and_failed_cargo_have_context() {
     ] {
         let executable = fake_cargo(&scratch, script);
         let output = command(&fixture())
-            .env("CHANGED_FILES", "x")
+            .env("CHANGED_FILES_JSON", r#"["x"]"#)
             .env("CARGO", executable)
             .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
             .output()
@@ -630,7 +739,7 @@ cat "$FAKE_METADATA"
         }
         std::fs::write(&metadata_path, serde_json::to_vec(&json).unwrap()).unwrap();
         let output = command(&fixture())
-            .env("CHANGED_FILES", "lib-core/src/lib.rs")
+            .env("CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#)
             .env("CARGO", &executable)
             .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
             .env("FAKE_METADATA", &metadata_path)
@@ -668,7 +777,7 @@ fn results_are_echoed_and_summary_is_appended_in_both_modes() {
             std::fs::write(&output_path, "existing=value\n").unwrap();
             std::fs::write(&summary_path, "existing summary\n").unwrap();
             let mut cmd = command(&fixture());
-            cmd.env("CHANGED_FILES", changed)
+            cmd.env("CHANGED_FILES_JSON", json(changed))
                 .env("FORCE_TRIGGERS", trigger)
                 .env("GITHUB_STEP_SUMMARY", &summary_path);
             if file_output {
@@ -735,7 +844,7 @@ fn output_bytes_match_stage_three_in_both_modes() {
             // Keep unrelated Cargo processes from adding package-cache lock notices.
             // This fixture has only local dependencies, so an empty cache is sufficient.
             cmd.env("CARGO_HOME", scratch.path().join("cargo-home"));
-            cmd.env("CHANGED_FILES", changed)
+            cmd.env("CHANGED_FILES_JSON", json(changed))
                 .env("FORCE_TRIGGERS", trigger)
                 .env("EXCLUDED_MEMBERS", excluded)
                 .env("GITHUB_STEP_SUMMARY", &summary_path);
@@ -779,7 +888,7 @@ fn invalid_summary_does_not_publish_outputs() {
     let output_path = scratch.path().join("output");
     std::fs::write(&output_path, "sentinel\n").unwrap();
     let output = command(&fixture())
-        .env("CHANGED_FILES", "x")
+        .env("CHANGED_FILES_JSON", r#"["x"]"#)
         .env("GITHUB_OUTPUT", &output_path)
         .env("GITHUB_STEP_SUMMARY", scratch.path())
         .output()
@@ -797,7 +906,7 @@ fn output_locations_can_be_non_utf8_paths() {
     let path = scratch.path().join(OsStr::from_bytes(b"output-\xff"));
     std::fs::write(&path, "").unwrap();
     let output = command(&fixture())
-        .env("CHANGED_FILES", "app-alpha/src/main.rs")
+        .env("CHANGED_FILES_JSON", r#"["app-alpha/src/main.rs"]"#)
         .env("GITHUB_OUTPUT", &path)
         .output()
         .unwrap();
@@ -810,7 +919,7 @@ fn output_locations_can_be_non_utf8_paths() {
 fn real_output_write_failures_exit_one() {
     for destination in ["GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "stdout"] {
         let mut cmd = command(&fixture());
-        cmd.env("CHANGED_FILES", "app-alpha/src/main.rs");
+        cmd.env("CHANGED_FILES_JSON", r#"["app-alpha/src/main.rs"]"#);
         if destination == "stdout" {
             cmd.stdout(
                 std::fs::OpenOptions::new()
@@ -846,7 +955,7 @@ fn unavailable_sources_fail_without_publishing_partial_results() {
             std::fs::write(&summary_path, "sentinel\n").unwrap();
             let output = command(scratch.path())
                 .env("CARGO_HOME", scratch.path().join("cargo-home"))
-                .env("CHANGED_FILES", changed)
+                .env("CHANGED_FILES_JSON", json(changed))
                 .env("GITHUB_OUTPUT", &output_path)
                 .env("GITHUB_STEP_SUMMARY", &summary_path)
                 .output()
@@ -869,7 +978,7 @@ fn malformed_lockfiles_fail_without_modification() {
             std::fs::write(&lock, b"not toml\xff").unwrap();
             let output = run(
                 &scratch.path().join(directory),
-                &[("CHANGED_FILES", changed)],
+                &[("CHANGED_FILES_JSON", &json(changed))],
             );
             assert_error(&output, "cargo metadata failed");
             assert_eq!(std::fs::read(lock).unwrap(), b"not toml\xff");
@@ -941,7 +1050,7 @@ fn git_source_patch_uses_cargos_selected_workspace_identity() {
     assert_eq!(node["deps"][0]["pkg"], member["id"]);
     let output = command(scratch.path())
         .env("CARGO_HOME", &cache)
-        .env("CHANGED_FILES", "member/src/lib.rs")
+        .env("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#)
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -977,7 +1086,7 @@ fn locate_project_failures_are_reported_before_metadata() {
         for changed in ["", "lib-core/src/lib.rs"] {
             let output = command(&fixture())
                 .env("CARGO", &executable)
-                .env("CHANGED_FILES", changed)
+                .env("CHANGED_FILES_JSON", json(changed))
                 .output()
                 .unwrap();
             assert_error(&output, expected);
@@ -1007,7 +1116,7 @@ esac
         .env("EXPECTED_CWD", &cwd)
         .env("COMMAND_LOG", &log)
         .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
-        .env("CHANGED_FILES", "lib-core/src/lib.rs")
+        .env("CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#)
         .output()
         .unwrap();
     assert_error(&output, "cargo metadata failed: error: locked failure");
@@ -1048,7 +1157,7 @@ fn unresolved_metadata_fails_even_for_empty_input_and_force_all() {
             .env("CARGO", &executable)
             .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
             .env("FAKE_METADATA", &data)
-            .env("CHANGED_FILES", changed)
+            .env("CHANGED_FILES_JSON", json(changed))
             .env("FORCE_TRIGGERS", force)
             .env("GITHUB_OUTPUT", &output_file)
             .env("GITHUB_STEP_SUMMARY", &summary)
@@ -1114,7 +1223,7 @@ fn invalid_metadata_annotations_are_escaped_and_outputs_remain_untouched() {
             .env("CARGO", &executable)
             .env("FAKE_MANIFEST", fixture().join("Cargo.toml"))
             .env("FAKE_METADATA", &data_path)
-            .env("CHANGED_FILES", "lib-core/src/lib.rs")
+            .env("CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#)
             .env("GITHUB_OUTPUT", &output_file)
             .env("GITHUB_STEP_SUMMARY", &summary)
             .output()

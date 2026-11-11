@@ -22,7 +22,7 @@ fn run_binary(envs: &[(&str, &str)]) -> (String, bool) {
     // Clear env vars that could interfere
     cmd.env_remove("GITHUB_OUTPUT");
     cmd.env_remove("GITHUB_STEP_SUMMARY");
-    cmd.env_remove("CHANGED_FILES");
+    cmd.env_remove("CHANGED_FILES_JSON");
     cmd.env_remove("FORCE_TRIGGERS");
     cmd.env_remove("EXCLUDED_MEMBERS");
     for (k, v) in envs {
@@ -37,13 +37,13 @@ fn parse_json(stdout: &str) -> Value {
     serde_json::from_str(stdout.trim()).expect("Failed to parse JSON output")
 }
 
-// ── CHANGED_FILES parsing ───────────────────────────────────────────
+// ── CHANGED_FILES_JSON ──────────────────────────────────────────────
 
 #[test]
-fn env_changed_files_space_separated() {
+fn env_changed_files_json_array() {
     let (stdout, ok) = run_binary(&[(
-        "CHANGED_FILES",
-        "lib-utils/src/lib.rs lib-standalone/src/lib.rs",
+        "CHANGED_FILES_JSON",
+        r#"["lib-utils/src/lib.rs","lib-standalone/src/lib.rs"]"#,
     )]);
     assert!(ok);
     let json = parse_json(&stdout);
@@ -52,21 +52,8 @@ fn env_changed_files_space_separated() {
 }
 
 #[test]
-fn env_changed_files_newline_separated() {
-    // split_whitespace handles newlines as well as spaces
-    let (stdout, ok) = run_binary(&[(
-        "CHANGED_FILES",
-        "lib-utils/src/lib.rs\nlib-standalone/src/lib.rs",
-    )]);
-    assert!(ok);
-    let json = parse_json(&stdout);
-    let changed: Vec<String> = serde_json::from_value(json["changed_crates"].clone()).unwrap();
-    assert_eq!(changed, vec!["lib-standalone", "lib-utils"]);
-}
-
-#[test]
-fn env_changed_files_empty_string() {
-    let (stdout, ok) = run_binary(&[("CHANGED_FILES", "")]);
+fn env_changed_files_empty_array() {
+    let (stdout, ok) = run_binary(&[("CHANGED_FILES_JSON", "[]")]);
     assert!(ok);
     let json = parse_json(&stdout);
     assert_eq!(json["changed_crates"], Value::Array(vec![]));
@@ -75,33 +62,12 @@ fn env_changed_files_empty_string() {
     assert_eq!(json["force_all"], false);
 }
 
-#[test]
-fn env_changed_files_unset() {
-    let (stdout, ok) = run_binary(&[]);
-    assert!(ok);
-    let json = parse_json(&stdout);
-    assert_eq!(json["changed_crates"], Value::Array(vec![]));
-    assert_eq!(json["force_all"], false);
-}
-
-#[test]
-fn env_changed_files_extra_whitespace_ignored() {
-    let (stdout, ok) = run_binary(&[(
-        "CHANGED_FILES",
-        "  lib-core/src/lib.rs   app-alpha/src/main.rs  ",
-    )]);
-    assert!(ok);
-    let json = parse_json(&stdout);
-    let changed: Vec<String> = serde_json::from_value(json["changed_crates"].clone()).unwrap();
-    assert_eq!(changed, vec!["app-alpha", "lib-core"]);
-}
-
 // ── FORCE_TRIGGERS parsing ──────────────────────────────────────────
 
 #[test]
 fn env_force_triggers_space_separated() {
     let (stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", "infra/deploy.yml"),
+        ("CHANGED_FILES_JSON", r#"["infra/deploy.yml"]"#),
         ("FORCE_TRIGGERS", "Cargo.lock infra/"),
     ]);
     assert!(ok);
@@ -112,7 +78,7 @@ fn env_force_triggers_space_separated() {
 #[test]
 fn env_force_triggers_newline_separated() {
     let (stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", "infra/deploy.yml"),
+        ("CHANGED_FILES_JSON", r#"["infra/deploy.yml"]"#),
         ("FORCE_TRIGGERS", "Cargo.lock\ninfra/"),
     ]);
     assert!(ok);
@@ -122,7 +88,7 @@ fn env_force_triggers_newline_separated() {
 
 #[test]
 fn env_force_triggers_unset_means_no_force() {
-    let (stdout, ok) = run_binary(&[("CHANGED_FILES", "lib-core/src/lib.rs")]);
+    let (stdout, ok) = run_binary(&[("CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#)]);
     assert!(ok);
     let json = parse_json(&stdout);
     assert_eq!(json["force_all"], false);
@@ -133,7 +99,7 @@ fn env_force_triggers_trailing_slash_matches_directory() {
     // action.yml: "A trailing slash (e.g. "infra/") matches the directory
     // and everything inside it."
     let (stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", "infra/nested/deep/file.yml"),
+        ("CHANGED_FILES_JSON", r#"["infra/nested/deep/file.yml"]"#),
         ("FORCE_TRIGGERS", "infra/"),
     ]);
     assert!(ok);
@@ -145,7 +111,7 @@ fn env_force_triggers_trailing_slash_matches_directory() {
 fn env_force_triggers_bare_name_matches_exact_path() {
     // action.yml: 'A bare name (e.g. "Cargo.lock") matches that exact path only.'
     let (stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", "Cargo.lock"),
+        ("CHANGED_FILES_JSON", r#"["Cargo.lock"]"#),
         ("FORCE_TRIGGERS", "Cargo.lock"),
     ]);
     assert!(ok);
@@ -156,7 +122,7 @@ fn env_force_triggers_bare_name_matches_exact_path() {
 #[test]
 fn env_force_triggers_bare_name_no_match_on_different_file() {
     let (stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", "lib-core/src/lib.rs"),
+        ("CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#),
         ("FORCE_TRIGGERS", "Cargo.lock"),
     ]);
     assert!(ok);
@@ -168,7 +134,7 @@ fn env_force_triggers_bare_name_no_match_on_different_file() {
 fn env_force_triggers_glob_pattern() {
     // action.yml: 'Full glob patterns are also supported (e.g. "**/*.sql", ".github/**").'
     let (stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", ".github/workflows/ci.yml"),
+        ("CHANGED_FILES_JSON", r#"[".github/workflows/ci.yml"]"#),
         ("FORCE_TRIGGERS", ".github/**"),
     ]);
     assert!(ok);
@@ -181,7 +147,7 @@ fn env_force_triggers_glob_pattern() {
 #[test]
 fn env_excluded_members_space_separated() {
     let (stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", "lib-utils/src/lib.rs"),
+        ("CHANGED_FILES_JSON", r#"["lib-utils/src/lib.rs"]"#),
         ("EXCLUDED_MEMBERS", "lib-core app-alpha"),
     ]);
     assert!(ok);
@@ -198,7 +164,7 @@ fn env_excluded_members_space_separated() {
 #[test]
 fn env_excluded_members_newline_separated() {
     let (stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", "lib-utils/src/lib.rs"),
+        ("CHANGED_FILES_JSON", r#"["lib-utils/src/lib.rs"]"#),
         ("EXCLUDED_MEMBERS", "lib-core\napp-alpha"),
     ]);
     assert!(ok);
@@ -211,7 +177,7 @@ fn env_excluded_members_newline_separated() {
 
 #[test]
 fn env_excluded_members_unset_means_no_exclusions() {
-    let (stdout, ok) = run_binary(&[("CHANGED_FILES", "lib-utils/src/lib.rs")]);
+    let (stdout, ok) = run_binary(&[("CHANGED_FILES_JSON", r#"["lib-utils/src/lib.rs"]"#)]);
     assert!(ok);
     let json = parse_json(&stdout);
     let affected: Vec<String> =
@@ -231,7 +197,7 @@ fn env_github_output_writes_to_file() {
     std::fs::write(&tmp, "").unwrap();
 
     let (stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", "app-alpha/src/main.rs"),
+        ("CHANGED_FILES_JSON", r#"["app-alpha/src/main.rs"]"#),
         ("GITHUB_OUTPUT", tmp.to_str().unwrap()),
     ]);
     assert!(ok);
@@ -257,7 +223,7 @@ fn env_github_output_appends_to_existing_content() {
     std::fs::write(&tmp, "existing_key=existing_value\n").unwrap();
 
     let (_stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", "app-alpha/src/main.rs"),
+        ("CHANGED_FILES_JSON", r#"["app-alpha/src/main.rs"]"#),
         ("GITHUB_OUTPUT", tmp.to_str().unwrap()),
     ]);
     assert!(ok);
@@ -273,7 +239,7 @@ fn env_github_output_appends_to_existing_content() {
 
 #[test]
 fn stdout_json_contains_all_fields() {
-    let (stdout, ok) = run_binary(&[("CHANGED_FILES", "lib-core/src/lib.rs")]);
+    let (stdout, ok) = run_binary(&[("CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#)]);
     assert!(ok);
     let json = parse_json(&stdout);
     // All four keys present
@@ -293,7 +259,10 @@ fn stdout_json_contains_all_fields() {
 #[test]
 fn all_env_vars_together() {
     let (stdout, ok) = run_binary(&[
-        ("CHANGED_FILES", "lib-utils/src/lib.rs infra/deploy.yml"),
+        (
+            "CHANGED_FILES_JSON",
+            r#"["lib-utils/src/lib.rs","infra/deploy.yml"]"#,
+        ),
         ("FORCE_TRIGGERS", "infra/"),
         ("EXCLUDED_MEMBERS", "app-alpha lib-core-ext"),
     ]);
