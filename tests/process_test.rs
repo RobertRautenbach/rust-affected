@@ -334,12 +334,13 @@ fn json_paths_are_exact_strings() {
             "{files}"
         );
     }
-    // A name git would have quoted is not unquoted: it is a different, unowned path.
+    // Neither is it split or unquoted: a space keeps "member/src/lib.rs" inside
+    // an unowned directory, and git's quoted form is a different, unowned path.
     let output = run(
         scratch.path(),
         &[(
             "CHANGED_FILES_JSON",
-            r#"["\"member/src/caf\\303\\251.rs\"", "\"member/src/lib.rs\""]"#,
+            r#"["docs/notes member/src/lib.rs", "\"member/src/caf\\303\\251.rs\"", "\"member/src/lib.rs\""]"#,
         )],
     );
     assert!(output.status.success());
