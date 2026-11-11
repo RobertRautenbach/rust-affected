@@ -43,15 +43,16 @@ inputs:
       tooling or helper crates that should never be deployed.
       If omitted, no members are excluded.
     required: false
-  ignore_cargo_config:
+  trust_cargo_config:
     description: >
-      Set to "true" to run Cargo from outside the checkout, so the repository's
-      .cargo/config.toml and rust-toolchain files are not read. A pull request
-      can otherwise use them to make Cargo run arbitrary programs during
-      detection. Settings that only exist in that configuration, such as
-      [patch] entries, vendored sources and private registries, are then
-      ignored, and resolution fails if the workspace depends on them.
-      Defaults to "false".
+      Set to "true" to let Cargo read the repository's .cargo/config.toml. By
+      default ("false") Cargo runs from outside the checkout and does not read
+      it, because a pull request can use it to make Cargo run arbitrary
+      programs during detection. Set it only where the checkout is trusted,
+      when the workspace depends on settings that exist only in that
+      configuration, such as [patch] entries, vendored sources, private
+      registries or net.git-fetch-with-cli. A rust-toolchain file is never
+      used: the action runs its own pinned toolchain.
     required: false
     default: 'false'
 
@@ -72,4 +73,4 @@ runs:
     CHANGED_FILES_JSON: ${{ inputs.changed_files_json }}
     FORCE_TRIGGERS: ${{ inputs.force_triggers }}
     EXCLUDED_MEMBERS: ${{ inputs.excluded_members }}
-    IGNORE_CARGO_CONFIG: ${{ inputs.ignore_cargo_config }}
+    TRUST_CARGO_CONFIG: ${{ inputs.trust_cargo_config }}

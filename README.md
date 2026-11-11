@@ -87,9 +87,11 @@ jobs:
 
 Empty lists skip their test jobs. Packages with both a library and a binary appear only in the binary list, where both are tested.
 
-> **Safety:** The action runs Cargo, which can execute repository-configured programs. For untrusted pull requests, use `pull_request` with read-only permissions and no secrets, as shown above. Do not run untrusted PR code in privileged `pull_request_target` or `workflow_run` jobs.
+> **Safety:** By default the action runs Cargo from outside the checkout, so the repository's `.cargo/config.toml` is not read. A pull request can use that file to make Cargo run arbitrary programs. A `rust-toolchain.toml` is never used: the action runs its own pinned toolchain.
 >
-> Set `ignore_cargo_config: true` to stop Cargo reading the repository's `.cargo/config.toml` and `rust-toolchain.toml`, which is how a pull request makes it run programs. `[patch]` entries, vendored sources and private registries defined only in that configuration are then ignored, so the action fails if your workspace needs them. This narrows the risk; it does not make a privileged job safe for untrusted code.
+> If your workspace needs that configuration (`[patch]` entries, vendored sources, private registries, `net.git-fetch-with-cli`), set `trust_cargo_config: true`. Do that only where the checkout is trusted or the job is unprivileged: `pull_request` with read-only permissions and no secrets, as shown above. Never set it in a `pull_request_target` or `workflow_run` job that checks out pull request code.
+>
+> The default narrows the risk; it is not a sandbox. Do not run untrusted code in privileged jobs either way.
 
 The `tj-actions/changed-files` settings above matter:
 
@@ -149,7 +151,7 @@ This excludes the package named `internal-helper` and packages under `tools/`. O
 | `changed_files_json` | **Required.** JSON array of changed paths relative to the workspace root, such as `["src/lib.rs","docs/my file.md"]`. Use `[]` when nothing changed. |
 | `force_triggers` | Paths or patterns that select all non-excluded packages. |
 | `excluded_members` | Package names or directory paths to omit. |
-| `ignore_cargo_config` | `true` runs Cargo without the repository's Cargo configuration. Default `false`. |
+| `trust_cargo_config` | `true` lets Cargo read the repository's `.cargo/config.toml`. Default `false`. |
 
 The action returns these outputs and adds a summary to the workflow run:
 
@@ -177,7 +179,7 @@ Invalid configuration or Cargo failures fail the action rather than return parti
 
 ## Migrating from v4
 
-v5 replaces the `changed_files` input with `changed_files_json`.
+v5 replaces the `changed_files` input with `changed_files_json`, and stops reading the repository's Cargo configuration unless told to.
 
 | v4 | v5 |
 |---|---|
@@ -185,5 +187,8 @@ v5 replaces the `changed_files` input with `changed_files_json`.
 | Empty or missing value meant "nothing changed" | `[]` means "nothing changed"; a blank value fails |
 | Filenames containing whitespace unsupported | Any filename works |
 | Git-quoted names were decoded | Names are taken literally |
+| Repository Cargo configuration read unless `ignore_cargo_config: true` | Not read unless `trust_cargo_config: true` |
 
 Change the step that produces the list to emit JSON, as in the quick start, and rename the input. A workflow that still passes `changed_files` fails with a message naming `changed_files_json`, so it cannot silently select nothing.
+
+If your workspace relies on `.cargo/config.toml`, add `trust_cargo_config: true`. When that configuration is needed but unread, Cargo usually fails and the error names the file. Without a committed `Cargo.lock` it may resolve differently instead; the action warns about the unread file in that case. `ignore_cargo_config` no longer exists and has no effect.
