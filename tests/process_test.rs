@@ -36,6 +36,7 @@ fn command(cwd: &Path) -> Command {
         "CHANGED_FILES",
         "FORCE_TRIGGERS",
         "EXCLUDED_MEMBERS",
+        "IGNORE_CARGO_CONFIG",
     ] {
         cmd.env_remove(key);
     }
@@ -152,6 +153,138 @@ fn invalid_glob_fails_even_without_changes() {
             "invalid force_triggers pattern",
         );
     }
+}
+
+#[test]
+fn unmatchable_trigger_fails_even_without_changes() {
+    for changed in ["lib-core/src/lib.rs", ""] {
+        for trigger in ["/Cargo.lock", "./", "infra/../infra/"] {
+            assert_error(
+                &run(
+                    &fixture(),
+                    &[("CHANGED_FILES", changed), ("FORCE_TRIGGERS", trigger)],
+                ),
+                "can never match",
+            );
+        }
+    }
+}
+
+const MEMBER_LOCK: &str = "version = 4\n\n[[package]]\nname = \"member\"\nversion = \"0.1.0\"\n";
+const MEMBER_OUTPUT: &str = "{\"affected_binary_members\":[],\"affected_library_members\":[\"member\"],\"changed_crates\":[\"member\"],\"force_all\":false}\n";
+
+#[cfg(unix)]
+#[test]
+fn ignoring_cargo_config_stops_repository_configured_programs() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = workspace();
+    std::fs::write(scratch.path().join("Cargo.lock"), MEMBER_LOCK).unwrap();
+    let marker = scratch.path().join("executed");
+    let program = scratch.path().join("rustc.sh");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\necho ran >> '{}'\nexec rustc \"$@\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir(scratch.path().join(".cargo")).unwrap();
+    std::fs::write(
+        scratch.path().join(".cargo/config.toml"),
+        format!("[build]\nrustc = '{}'\n", program.display()),
+    )
+    .unwrap();
+    // By default Cargo honours the checkout's configuration and runs the program.
+    for value in [None, Some("false")] {
+        let mut cmd = command(scratch.path());
+        cmd.env("CHANGED_FILES", "member/src/lib.rs");
+        if let Some(value) = value {
+            cmd.env("IGNORE_CARGO_CONFIG", value);
+        }
+        cmd.output().unwrap();
+        assert!(marker.exists(), "{value:?}");
+        std::fs::remove_file(&marker).unwrap();
+    }
+    // Ignored, from the root and from a member, with identical results.
+    for directory in ["", "member"] {
+        let output = command(&scratch.path().join(directory))
+            .env("CHANGED_FILES", "member/src/lib.rs")
+            .env("IGNORE_CARGO_CONFIG", "true")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(stderr, "");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), MEMBER_OUTPUT);
+        assert!(!marker.exists(), "program ran from {directory:?}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("Cargo.lock")).unwrap(),
+        MEMBER_LOCK
+    );
+}
+
+#[test]
+fn ignoring_cargo_config_drops_configured_patches_and_fails_closed() {
+    let patched = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/patch-config");
+    let honoured = run(&patched, &[("CHANGED_FILES", "core/src/lib.rs")]);
+    assert!(honoured.status.success());
+    // The [patch] lives only in .cargo/config.toml; without it the lock is stale.
+    assert_error(
+        &run(
+            &patched,
+            &[
+                ("CHANGED_FILES", "core/src/lib.rs"),
+                ("IGNORE_CARGO_CONFIG", "true"),
+            ],
+        ),
+        "cargo metadata failed",
+    );
+}
+
+#[test]
+fn ignore_cargo_config_requires_a_boolean_and_a_manifest() {
+    for value in ["1", "yes", "TRUE", "True", " true"] {
+        assert_error(
+            &run(
+                &fixture(),
+                &[
+                    ("CHANGED_FILES", "lib-core/src/lib.rs"),
+                    ("IGNORE_CARGO_CONFIG", value),
+                ],
+            ),
+            "IGNORE_CARGO_CONFIG must be 'true' or 'false'",
+        );
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    assert_error(
+        &run(
+            scratch.path(),
+            &[("CHANGED_FILES", "x"), ("IGNORE_CARGO_CONFIG", "true")],
+        ),
+        "could not find Cargo.toml",
+    );
+}
+
+#[test]
+fn uncovered_workspace_files_warn_without_changing_results() {
+    let output = run(
+        &fixture(),
+        &[("CHANGED_FILES", "Cargo.lock ./Cargo.toml README.md")],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.starts_with("::warning::workspace-wide files changed but belong to no package and matched no force trigger, so nothing was selected for them: [\"Cargo.lock\", \"Cargo.toml\"]."),
+        "{stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"affected_binary_members\":[],\"affected_library_members\":[],\"changed_crates\":[],\"force_all\":false}\n"
+    );
 }
 
 #[test]
