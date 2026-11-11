@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compare a baseline and a candidate binary, including all five observable channels.
-# Each binary gets the changed files in both the v4 and the v5 form.
+# Each binary gets the changed files and exclusions under both the v4 and the v5 names.
 # Usage: RUSTUP_TOOLCHAIN=<installed version> scripts/differential-test.sh BASELINE CANDIDATE
 set -euo pipefail
 if [[ "$#" -ne 2 ]]; then
@@ -73,7 +73,8 @@ record() {
       # v4 binaries read the whitespace list and v5 binaries the JSON array.
       # v5 reads the fixtures' Cargo configuration only when told it is trusted.
       envs=(CHANGED_FILES="$changed" CHANGED_FILES_JSON="$(jq -Rc 'split(" ") | map(select(. != ""))' <<< "$changed")"
-            TRUST_CARGO_CONFIG=true FORCE_TRIGGERS="$force" EXCLUDED_MEMBERS="$excluded"
+            TRUST_CARGO_CONFIG=true FORCE_TRIGGERS="$force"
+            EXCLUDED_MEMBERS="$excluded" EXCLUDED_PACKAGES="$excluded"
             GITHUB_STEP_SUMMARY="$dir/summary")
       if [[ "$mode" == file ]]; then
         envs+=(GITHUB_OUTPUT="$dir/output")

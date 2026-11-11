@@ -25,8 +25,8 @@ jobs:
   affected:
     runs-on: ubuntu-latest
     outputs:
-      libraries: ${{ steps.affected.outputs.affected_library_members }}
-      binaries: ${{ steps.affected.outputs.affected_binary_members }}
+      libraries: ${{ steps.affected.outputs.affected_libraries }}
+      binaries: ${{ steps.affected.outputs.affected_binaries }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -135,7 +135,7 @@ Patterns are relative to the workspace root. A pattern that could never match (e
 To leave packages out of the results:
 
 ```yaml
-excluded_members: |
+excluded_packages: |
   internal-helper
   tools/
 ```
@@ -150,16 +150,16 @@ This excludes the package named `internal-helper` and packages under `tools/`. O
 |---|---|
 | `changed_files_json` | **Required.** JSON array of changed paths relative to the workspace root, such as `["src/lib.rs","docs/my file.md"]`. Use `[]` when nothing changed. |
 | `force_triggers` | Paths or patterns that select all non-excluded packages. |
-| `excluded_members` | Package names or directory paths to omit. |
+| `excluded_packages` | Package names or directory paths to omit. |
 | `trust_cargo_config` | `true` lets Cargo read the repository's `.cargo/config.toml`. Default `false`. |
 
 The action returns these outputs and adds a summary to the workflow run:
 
 | Output | Description |
 |---|---|
-| `changed_crates` | Packages whose own files changed. |
-| `affected_library_members` | Affected packages without a binary target. |
-| `affected_binary_members` | Affected packages with a binary target. |
+| `changed_packages` | Packages whose own files changed. |
+| `affected_libraries` | Affected packages without a binary target. |
+| `affected_binaries` | Affected packages with a binary target. |
 | `force_all` | `"true"` when a force trigger matched; otherwise `"false"`. |
 
 Package lists are JSON arrays, such as `["shared-lib","api-server"]`. Use `fromJSON(...)` to read them in a workflow.
@@ -179,7 +179,7 @@ Invalid configuration or Cargo failures fail the action rather than return parti
 
 ## Migrating from v4
 
-v5 replaces the `changed_files` input with `changed_files_json`, and stops reading the repository's Cargo configuration unless told to.
+v5 replaces the `changed_files` input with `changed_files_json`, stops reading the repository's Cargo configuration unless told to, and renames one input and three outputs so that they all say "packages".
 
 | v4 | v5 |
 |---|---|
@@ -188,7 +188,13 @@ v5 replaces the `changed_files` input with `changed_files_json`, and stops readi
 | Filenames containing whitespace unsupported | Any filename works |
 | Git-quoted names were decoded | Names are taken literally |
 | Repository Cargo configuration read unless `ignore_cargo_config: true` | Not read unless `trust_cargo_config: true` |
+| Input `excluded_members` | `excluded_packages` |
+| Output `changed_crates` | `changed_packages` |
+| Output `affected_library_members` | `affected_libraries` |
+| Output `affected_binary_members` | `affected_binaries` |
 
 Change the step that produces the list to emit JSON, as in the quick start, and rename the input. A workflow that still passes `changed_files` fails with a message naming `changed_files_json`, so it cannot silently select nothing.
 
 If your workspace relies on `.cargo/config.toml`, add `trust_cargo_config: true`. When that configuration is needed but unread, Cargo usually fails and the error names the file. Without a committed `Cargo.lock` it may resolve differently instead; the action warns about the unread file in that case. `ignore_cargo_config` no longer exists and has no effect.
+
+The renamed outputs carry the same values as before. Update every `steps.<id>.outputs.<name>` reference: an old output name now yields an empty string, which `fromJSON` rejects. An old `excluded_members` input is ignored, so its packages reappear in the outputs until it is renamed; the runner reports it as an unexpected input.
