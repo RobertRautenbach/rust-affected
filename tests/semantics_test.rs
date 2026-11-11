@@ -407,47 +407,37 @@ fn force_triggers_that_can_never_match_are_rejected() {
 }
 
 #[test]
-fn git_quoted_paths_are_decoded_before_attribution() {
+fn paths_are_literal_strings() {
     let expected = compute("workspace", &["lib-core/src/lib.rs"], &[], &[]);
     for file in [
-        r#""lib-core/src/caf\303\251.rs""#,
-        r#""lib-core/src/a\"b.rs""#,
-        r#""lib-core/src/a\\b.rs""#,
-        r#""lib-core/src/tab\there.rs""#,
-        r#""lib-core/src/\001\a\b\v\f\n\r.rs""#,
-        r#""./lib-core//src/lib.rs""#,
+        "lib-core/src/my file.rs",
+        "lib-core/src/café.rs",
+        "lib-core/src/a\"b.rs",
+        "lib-core/src/a\\b.rs",
+        "lib-core/src/tab\there.rs",
+        "lib-core/ src/lib.rs",
     ] {
         assert_eq!(compute("workspace", &[file], &[], &[]), expected, "{file}");
     }
     assert!(
         compute(
             "workspace",
-            &[r#""infra/caf\303\251.yml""#],
-            &["infra/café.yml"],
+            &["infra/my file.yml"],
+            &["infra/my file.yml"],
             &[]
         )
         .force_all
     );
-    // Undecodable quotes own nothing, force nothing and are reported.
+    // Quotes are part of the name: git's quoted form is a different path that
+    // nothing owns, and it is neither decoded nor reported.
     for file in [
+        r#""lib-core/src/lib.rs""#,
+        r#""lib-core/src/caf\303\251.rs""#,
         r#""lib-core/src/my"#,
-        r#"""#,
-        r#""""#,
-        r#""lib-core/src/a"b.rs""#,
-        r#""lib-core/src/\x41.rs""#,
-        r#""lib-core/src/\08.rs""#,
-        r#""lib-core/src/\400.rs""#,
-        r#""lib-core/src/\377.rs""#,
-        r#""lib-core/src/trailing\""#,
-        r#""../lib-core/src/lib.rs""#,
     ] {
-        let result = compute("workspace", &[file], &["**"], &[]);
+        let result = compute("workspace", &[file], &[], &[]);
         assert_lists(&result, &[], &[], &[]);
-        assert_eq!(
-            result.warnings,
-            [rust_affected::Warning::UnusablePath(file.into())],
-            "{file}"
-        );
+        assert_eq!(result.warnings, [], "{file}");
     }
 }
 

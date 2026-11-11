@@ -93,53 +93,7 @@ fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
     (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
-// Git C-quotes names with unusual bytes, such as "caf\303\251.rs", unless
-// core.quotePath is off or -z is used. Left quoted, they would own nothing.
-fn unquote_git_path(quoted: &str) -> Option<String> {
-    let inner = quoted.strip_prefix('"')?.strip_suffix('"')?;
-    let mut bytes = Vec::with_capacity(inner.len());
-    let mut rest = inner.bytes();
-    while let Some(byte) = rest.next() {
-        if byte == b'"' {
-            return None;
-        }
-        if byte != b'\\' {
-            bytes.push(byte);
-            continue;
-        }
-        bytes.push(match rest.next()? {
-            b'a' => 0x07,
-            b'b' => 0x08,
-            b't' => b'\t',
-            b'n' => b'\n',
-            b'v' => 0x0b,
-            b'f' => 0x0c,
-            b'r' => b'\r',
-            escaped @ (b'"' | b'\\') => escaped,
-            // Git always writes three octal digits, and a byte needs no more.
-            high @ b'0'..=b'3' => {
-                let mut value = high - b'0';
-                for _ in 0..2 {
-                    let digit = rest.next().filter(|digit| (b'0'..=b'7').contains(digit))?;
-                    value = value * 8 + (digit - b'0');
-                }
-                value
-            }
-            _ => return None,
-        });
-    }
-    String::from_utf8(bytes).ok()
-}
-
 fn normalize_changed_file(file: &str, root: &Path) -> Option<PathBuf> {
-    // A quote that cannot be decoded (a name split on whitespace) is unusable.
-    let unquoted;
-    let file = if file.starts_with('"') {
-        unquoted = unquote_git_path(file)?;
-        unquoted.as_str()
-    } else {
-        file
-    };
     let path = Path::new(file);
     let relative = if path.is_absolute() {
         path.strip_prefix(root).ok()?
@@ -260,9 +214,9 @@ fn direct_owners(
 /// dependencies, `[patch]` targets, vendored crates); these are never reported
 /// themselves, but the members that depend on them are.
 ///
-/// Paths are normalized lexically, so deleted files work. Git-quoted paths are
-/// decoded first. Unusable paths are warned about and ignored, including for
-/// force triggers.
+/// Paths are normalized lexically, so deleted files work, and are otherwise
+/// taken literally: nothing is unquoted or split. Unusable paths are warned
+/// about and ignored, including for force triggers.
 ///
 /// # Errors
 /// Returns an error for invalid force-trigger patterns or failed graph queries.

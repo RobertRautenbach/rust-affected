@@ -334,6 +334,19 @@ fn json_paths_are_exact_strings() {
             "{files}"
         );
     }
+    // A name git would have quoted is not unquoted: it is a different, unowned path.
+    let output = run(
+        scratch.path(),
+        &[(
+            "CHANGED_FILES_JSON",
+            r#"["\"member/src/caf\\303\\251.rs\"", "\"member/src/lib.rs\""]"#,
+        )],
+    );
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"affected_binary_members\":[],\"affected_library_members\":[],\"changed_crates\":[],\"force_all\":false}\n"
+    );
 }
 
 #[test]
