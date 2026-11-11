@@ -126,6 +126,47 @@ fn outside_checkout() -> Result<(PathBuf, PathBuf), String> {
     Ok((manifest, root))
 }
 
+/// The absolute workspace manifest, as `cargo locate-project` reports it.
+fn workspace_manifest(locate: &mut Command) -> Result<PathBuf, String> {
+    let manifest = String::from_utf8(run_cargo(locate, "locate-project")?)
+        .map_err(|_| "cargo locate-project output is not valid UTF-8".to_string())?;
+    let manifest = Path::new(manifest.trim_end_matches(['\r', '\n']));
+    if !manifest.is_absolute() {
+        return Err("cargo locate-project returned no absolute workspace manifest path".into());
+    }
+    Ok(manifest.to_path_buf())
+}
+
+/// Resolve with `--locked` when the workspace has a lock, and warn when it has none.
+fn respect_lock(metadata: &mut MetadataCommand, manifest: &Path) -> Result<(), String> {
+    let root = manifest
+        .parent()
+        .ok_or("cargo locate-project returned an invalid workspace manifest path")?;
+    if root
+        .join("Cargo.lock")
+        .try_exists()
+        .map_err(|error| format!("failed to inspect workspace Cargo.lock: {error}"))?
+    {
+        metadata.other_options(["--locked"]);
+        return Ok(());
+    }
+    annotation(
+        "warning",
+        "No Cargo.lock in the workspace root; cargo metadata will resolve dependencies and may create one (owned by root inside the action). Commit Cargo.lock to use --locked.",
+    )
+}
+
+/// The JSON document printed by `cargo metadata`.
+fn resolved_metadata(metadata: &MetadataCommand) -> Result<String, String> {
+    let stdout = String::from_utf8(run_cargo(&mut metadata.cargo_command(), "metadata")?)
+        .map_err(|_| "cargo metadata output is not valid UTF-8".to_string())?;
+    let json = stdout
+        .lines()
+        .find(|line| line.starts_with('{'))
+        .ok_or("cargo metadata returned no JSON")?;
+    Ok(json.to_owned())
+}
+
 fn load_graph(ignore_cargo_config: bool) -> Result<WorkspaceGraph, String> {
     let mut metadata = MetadataCommand::new();
     // Discover the lock next to the workspace manifest, even when run in a member.
@@ -141,37 +182,13 @@ fn load_graph(ignore_cargo_config: bool) -> Result<WorkspaceGraph, String> {
     } else {
         None
     };
-    let manifest = String::from_utf8(run_cargo(&mut locate, "locate-project")?)
-        .map_err(|_| "cargo locate-project output is not valid UTF-8".to_string())?;
-    let manifest = Path::new(manifest.trim_end_matches(['\r', '\n']));
-    if !manifest.is_absolute() {
-        return Err("cargo locate-project returned no absolute workspace manifest path".into());
-    }
-    let root = manifest
-        .parent()
-        .ok_or("cargo locate-project returned an invalid workspace manifest path")?;
+    let manifest = workspace_manifest(&mut locate)?;
     if let Some(neutral) = neutral {
-        metadata.manifest_path(manifest).current_dir(neutral);
+        metadata.manifest_path(&manifest).current_dir(neutral);
     }
-    if root
-        .join("Cargo.lock")
-        .try_exists()
-        .map_err(|error| format!("failed to inspect workspace Cargo.lock: {error}"))?
-    {
-        metadata.other_options(["--locked"]);
-    } else {
-        annotation(
-            "warning",
-            "No Cargo.lock in the workspace root; cargo metadata will resolve dependencies and may create one (owned by root inside the action). Commit Cargo.lock to use --locked.",
-        )?;
-    }
-    let stdout = String::from_utf8(run_cargo(&mut metadata.cargo_command(), "metadata")?)
-        .map_err(|_| "cargo metadata output is not valid UTF-8".to_string())?;
-    let json = stdout
-        .lines()
-        .find(|line| line.starts_with('{'))
-        .ok_or("cargo metadata returned no JSON")?;
-    WorkspaceGraph::from_json(json).map_err(|error| error.to_string())
+    respect_lock(&mut metadata, &manifest)?;
+    let json = resolved_metadata(&metadata)?;
+    WorkspaceGraph::from_json(&json).map_err(|error| error.to_string())
 }
 
 /// Entries of each kind of warning, in the order the kinds are reported.
