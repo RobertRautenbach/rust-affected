@@ -310,12 +310,18 @@ for fixture in patch-selected patch-config patch-unused bridge; do
     patch-unused) binaries='[]' ;;
     bridge) binaries='["app","second"]' ;;
   esac
+  # patch-config keeps its [patch] in .cargo/config.toml, which is read only when trusted.
+  trust=false
+  [[ "${fixture}" != patch-config ]] || trust=true
   run_case "resolved ${fixture}" "${REPO_ROOT}/tests/fixtures/${fixture}" '["core/src/lib.rs"]' "" "" \
 "changed_crates=[\"resolution-core\"]
 affected_library_members=[\"resolution-core\"]
 affected_binary_members=${binaries}
-force_all=false"
+force_all=false" -e "TRUST_CARGO_CONFIG=${trust}"
 done
+# Untrusted, that [patch] is unread, the lock is stale, and the error names the file.
+run_failing_case "unread config is named when cargo fails" "${REPO_ROOT}/tests/fixtures/patch-config" \
+  '["core/src/lib.rs"]' "" "" '\.cargo/config\.toml was not read because trust_cargo_config is false'
 
 TOOLCHAIN_WS="${TMP_PARENT}/toolchain-workspace"
 copy_fixture "${TOOLCHAIN_WS}"
@@ -328,22 +334,23 @@ run_case "consumer toolchain ignored offline" "${TOOLCHAIN_WS}" '["lib-utils/src
 'changed_crates=["lib-utils"]
 affected_library_members=["lib-core","lib-core-ext","lib-utils"]
 affected_binary_members=["app-alpha","app-beta","tool-alpha"]
-force_all=false'
+force_all=false' \
+  -e TRUST_CARGO_CONFIG=true
 run_failing_case "unpinned toolchain fails without installing" "${TOOLCHAIN_WS}" '["lib-utils/src/lib.rs"]' "" "" 'is not installed' \
-  -e RUSTUP_TOOLCHAIN=
+  -e RUSTUP_TOOLCHAIN= -e TRUST_CARGO_CONFIG=true
 # Started outside the checkout, rustup cannot see the toolchain file either.
-run_case "toolchain file unread when cargo config is ignored" "${TOOLCHAIN_WS}" '["lib-utils/src/lib.rs"]' "" "" \
+run_case "toolchain file unread when the checkout is untrusted" "${TOOLCHAIN_WS}" '["lib-utils/src/lib.rs"]' "" "" \
 'changed_crates=["lib-utils"]
 affected_library_members=["lib-core","lib-core-ext","lib-utils"]
 affected_binary_members=["app-alpha","app-beta","tool-alpha"]
 force_all=false' \
-  -e RUSTUP_TOOLCHAIN= -e IGNORE_CARGO_CONFIG=true
+  -e RUSTUP_TOOLCHAIN=
 if [[ "${toolchain_before}" != "$(snapshot "${TOOLCHAIN_WS}")" ]]; then
   fail "toolchain cases modified the workspace"
 fi
 
 # A checkout's .cargo/config.toml can point Cargo at any program, and Cargo runs
-# it during detection. ignore_cargo_config must keep that program from running.
+# it during detection. It may run only when trust_cargo_config says so.
 CONFIG_WS="${TMP_PARENT}/config-workspace"
 copy_fixture "${CONFIG_WS}"
 mkdir -p "${CONFIG_WS}/.cargo"
@@ -354,17 +361,20 @@ CONFIG_EXPECTED='changed_crates=["lib-utils"]
 affected_library_members=["lib-core","lib-core-ext","lib-utils"]
 affected_binary_members=["app-alpha","app-beta","tool-alpha"]
 force_all=false'
-run_case "repository cargo config honoured by default" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}"
+run_case "repository cargo config honoured when trusted" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
+  -e TRUST_CARGO_CONFIG=true
 # Without this, the cases below would pass even if the isolation did nothing.
-[[ -f "${CONFIG_WS}/EXECUTED" ]] || fail "the planted program did not run by default"
+[[ -f "${CONFIG_WS}/EXECUTED" ]] || fail "the planted program did not run in a trusted checkout"
 rm -f "${CONFIG_WS}/EXECUTED"
 config_before="$(snapshot "${CONFIG_WS}")"
-run_case "repository cargo config ignored" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
-  -e IGNORE_CARGO_CONFIG=true
-run_case "repository cargo config ignored from a member" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
-  -e IGNORE_CARGO_CONFIG=true --workdir /github/workspace/app-alpha
-[[ "${config_before}" = "$(snapshot "${CONFIG_WS}")" ]] || fail "ignore_cargo_config still ran the planted program or changed the workspace"
-run_failing_case "invalid ignore_cargo_config" "${FIXTURE}" '["x"]' "" "" "IGNORE_CARGO_CONFIG must be" -e IGNORE_CARGO_CONFIG=yes
+run_case "repository cargo config unread by default" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}"
+run_case "repository cargo config unread from a member" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
+  --workdir /github/workspace/app-alpha
+# The switch removed in v5 must not turn the isolation off.
+run_case "removed ignore_cargo_config input" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
+  -e IGNORE_CARGO_CONFIG=false
+[[ "${config_before}" = "$(snapshot "${CONFIG_WS}")" ]] || fail "an untrusted checkout still ran the planted program or changed the workspace"
+run_failing_case "invalid trust_cargo_config" "${FIXTURE}" '["x"]' "" "" "TRUST_CARGO_CONFIG must be" -e TRUST_CARGO_CONFIG=yes
 
 # The dependency repository is owned by the host user while the container runs
 # as root, and git refuses to serve a repository owned by someone else unless it
@@ -377,7 +387,7 @@ EXPECTED_ANNOTATIONS="${LOCK_WARNING}" run_case "git dependency fetched with the
 affected_library_members=["consumer"]
 affected_binary_members=[]
 force_all=false' \
-  -e CARGO_NET_OFFLINE=false -v "${GITDEP}:/github/gitdep:ro" \
+  -e CARGO_NET_OFFLINE=false -e TRUST_CARGO_CONFIG=true -v "${GITDEP}:/github/gitdep:ro" \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*'
 rm -rf "${GITDEP}" "${GITWS}" || echo "warning: could not remove ${GITDEP} ${GITWS}" >&2
 
