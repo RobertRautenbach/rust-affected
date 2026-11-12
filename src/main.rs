@@ -126,6 +126,47 @@ fn outside_checkout() -> Result<(PathBuf, PathBuf), String> {
     Ok((manifest, root))
 }
 
+/// The absolute workspace manifest, as `cargo locate-project` reports it.
+fn workspace_manifest(locate: &mut Command) -> Result<PathBuf, String> {
+    let manifest = String::from_utf8(run_cargo(locate, "locate-project")?)
+        .map_err(|_| "cargo locate-project output is not valid UTF-8".to_string())?;
+    let manifest = Path::new(manifest.trim_end_matches(['\r', '\n']));
+    if !manifest.is_absolute() {
+        return Err("cargo locate-project returned no absolute workspace manifest path".into());
+    }
+    Ok(manifest.to_path_buf())
+}
+
+/// Resolve with `--locked` when the workspace has a lock, and warn when it has none.
+fn respect_lock(metadata: &mut MetadataCommand, manifest: &Path) -> Result<(), String> {
+    let root = manifest
+        .parent()
+        .ok_or("cargo locate-project returned an invalid workspace manifest path")?;
+    if root
+        .join("Cargo.lock")
+        .try_exists()
+        .map_err(|error| format!("failed to inspect workspace Cargo.lock: {error}"))?
+    {
+        metadata.other_options(["--locked"]);
+        return Ok(());
+    }
+    annotation(
+        "warning",
+        "No Cargo.lock in the workspace root; cargo metadata will resolve dependencies and may create one (owned by root inside the action). Commit Cargo.lock to use --locked.",
+    )
+}
+
+/// The JSON document printed by `cargo metadata`.
+fn resolved_metadata(metadata: &MetadataCommand) -> Result<String, String> {
+    let stdout = String::from_utf8(run_cargo(&mut metadata.cargo_command(), "metadata")?)
+        .map_err(|_| "cargo metadata output is not valid UTF-8".to_string())?;
+    let json = stdout
+        .lines()
+        .find(|line| line.starts_with('{'))
+        .ok_or("cargo metadata returned no JSON")?;
+    Ok(json.to_owned())
+}
+
 fn load_graph(ignore_cargo_config: bool) -> Result<WorkspaceGraph, String> {
     let mut metadata = MetadataCommand::new();
     // Discover the lock next to the workspace manifest, even when run in a member.
@@ -141,86 +182,61 @@ fn load_graph(ignore_cargo_config: bool) -> Result<WorkspaceGraph, String> {
     } else {
         None
     };
-    let manifest = String::from_utf8(run_cargo(&mut locate, "locate-project")?)
-        .map_err(|_| "cargo locate-project output is not valid UTF-8".to_string())?;
-    let manifest = Path::new(manifest.trim_end_matches(['\r', '\n']));
-    if !manifest.is_absolute() {
-        return Err("cargo locate-project returned no absolute workspace manifest path".into());
-    }
-    let root = manifest
-        .parent()
-        .ok_or("cargo locate-project returned an invalid workspace manifest path")?;
+    let manifest = workspace_manifest(&mut locate)?;
     if let Some(neutral) = neutral {
-        metadata.manifest_path(manifest).current_dir(neutral);
+        metadata.manifest_path(&manifest).current_dir(neutral);
     }
-    if root
-        .join("Cargo.lock")
-        .try_exists()
-        .map_err(|error| format!("failed to inspect workspace Cargo.lock: {error}"))?
-    {
-        metadata.other_options(["--locked"]);
-    } else {
-        annotation(
-            "warning",
-            "No Cargo.lock in the workspace root; cargo metadata will resolve dependencies and may create one (owned by root inside the action). Commit Cargo.lock to use --locked.",
-        )?;
+    respect_lock(&mut metadata, &manifest)?;
+    let json = resolved_metadata(&metadata)?;
+    WorkspaceGraph::from_json(&json).map_err(|error| error.to_string())
+}
+
+/// Entries of each kind of warning, in the order the kinds are reported.
+fn group_warnings(warnings: &[Warning]) -> [Vec<&str>; 4] {
+    let mut groups: [Vec<&str>; 4] = Default::default();
+    for warning in warnings {
+        let (group, entry) = match warning {
+            Warning::UnusablePath(path) => (0, path),
+            Warning::UnmatchedExclusion(entry) => (1, entry),
+            Warning::ExternalTarget(member) => (2, member),
+            Warning::UncoveredRootFile(file) => (3, file),
+        };
+        groups[group].push(entry.as_str());
     }
-    let stdout = String::from_utf8(run_cargo(&mut metadata.cargo_command(), "metadata")?)
-        .map_err(|_| "cargo metadata output is not valid UTF-8".to_string())?;
-    let json = stdout
-        .lines()
-        .find(|line| line.starts_with('{'))
-        .ok_or("cargo metadata returned no JSON")?;
-    WorkspaceGraph::from_json(json).map_err(|error| error.to_string())
+    groups
+}
+
+/// One annotation for a kind of warning, or none when it has no entries.
+fn warn_about(entries: &[&str], message: impl FnOnce() -> String) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    annotation("warning", &message())
 }
 
 fn emit_warnings(warnings: &[Warning]) -> Result<(), String> {
-    let mut paths = Vec::new();
-    let mut exclusions = Vec::new();
-    let mut external_targets = Vec::new();
-    let mut uncovered = Vec::new();
-    for warning in warnings {
-        match warning {
-            Warning::UnusablePath(path) => paths.push(path.as_str()),
-            Warning::UnmatchedExclusion(entry) => exclusions.push(entry.as_str()),
-            Warning::ExternalTarget(member) => external_targets.push(member.as_str()),
-            Warning::UncoveredRootFile(file) => uncovered.push(file.as_str()),
-        }
-    }
-    if !paths.is_empty() {
-        annotation(
-            "warning",
-            &format!(
-                "{} changed file(s) were ignored for attribution and force triggers: {paths:?}. Use paths relative to the workspace root or absolute paths beneath it; empty paths and '..' are not supported.",
-                paths.len()
-            ),
-        )?;
-    }
-    if !exclusions.is_empty() {
-        annotation(
-            "warning",
-            &format!(
-                "excluded_members entries matched no workspace member: {exclusions:?}. Names match crate names exactly; use a trailing slash such as 'tools/' to match a directory."
-            ),
-        )?;
-    }
-    if !external_targets.is_empty() {
-        annotation(
-            "warning",
-            &format!(
-                "workspace members declare targets outside their package directories: {external_targets:?}. Changes to those sources may not affect the declaring members. Configure force_triggers for shared source directories within the workspace root; sources outside that root require workflow-level invalidation."
-            ),
-        )?;
-    }
-    if !uncovered.is_empty() {
-        annotation(
-            "warning",
-            &format!(
-                "workspace-wide files changed but belong to no package and matched no force trigger, so nothing was selected for them: {uncovered:?}. They can affect every package; add them to force_triggers."
-            ),
-        )?;
-    }
-    Ok(())
+    let [paths, exclusions, external_targets, uncovered] = group_warnings(warnings);
+    warn_about(&paths, || {
+        format!(
+            "{} changed file(s) were ignored for attribution and force triggers: {paths:?}. Use paths relative to the workspace root or absolute paths beneath it; empty paths and '..' are not supported.",
+            paths.len()
+        )
+    })?;
+    warn_about(&exclusions, || {
+        format!(
+            "excluded_members entries matched no workspace member: {exclusions:?}. Names match crate names exactly; use a trailing slash such as 'tools/' to match a directory."
+        )
+    })?;
+    warn_about(&external_targets, || {
+        format!(
+            "workspace members declare targets outside their package directories: {external_targets:?}. Changes to those sources may not affect the declaring members. Configure force_triggers for shared source directories within the workspace root; sources outside that root require workflow-level invalidation."
+        )
+    })?;
+    warn_about(&uncovered, || {
+        format!(
+            "workspace-wide files changed but belong to no package and matched no force trigger, so nothing was selected for them: {uncovered:?}. They can affect every package; add them to force_triggers."
+        )
+    })
 }
 
 fn open_destination(name: &str) -> Result<Option<File>, String> {
@@ -240,23 +256,25 @@ fn write_destination(writer: &mut impl Write, contents: &str, name: &str) -> Res
         .map_err(|error| format!("failed to write {name}: {error}"))
 }
 
-fn emit_output(result: &AffectedResult) -> Result<(), String> {
+/// The action's historical output order; any other field follows alphabetically.
+fn field_rank(key: &str) -> u8 {
+    match key {
+        "changed_crates" => 0,
+        "affected_library_members" => 1,
+        "affected_binary_members" => 2,
+        "force_all" => 3,
+        _ => 4,
+    }
+}
+
+/// The `key=value` lines for `GITHUB_OUTPUT` and the single-line JSON document.
+fn render_outputs(result: &AffectedResult) -> Result<(String, String), String> {
     let value = serde_json::to_value(result).map_err(|error| error.to_string())?;
     let fields = value
         .as_object()
         .ok_or("affected result must serialize as an object")?;
     let mut fields: Vec<_> = fields.iter().collect();
-    // Preserve the action's historical line order while emitting every serialized field.
-    fields.sort_by_key(|(key, _)| {
-        let order = match key.as_str() {
-            "changed_crates" => 0,
-            "affected_library_members" => 1,
-            "affected_binary_members" => 2,
-            "force_all" => 3,
-            _ => 4,
-        };
-        (order, key.as_str())
-    });
+    fields.sort_by_key(|(key, _)| (field_rank(key), key.as_str()));
     let mut lines = String::new();
     for (key, value) in fields {
         lines.push_str(key);
@@ -265,20 +283,29 @@ fn emit_output(result: &AffectedResult) -> Result<(), String> {
         lines.push('\n');
     }
     // A JSON Value retains the existing alphabetic object-key order.
-    let json = format!("{value}\n");
-    let summary = render_summary(result);
+    Ok((lines, format!("{value}\n")))
+}
+
+fn append(file: &mut Option<File>, contents: &str, name: &str) -> Result<(), String> {
+    match file {
+        Some(file) => write_destination(file, contents, name),
+        None => Ok(()),
+    }
+}
+
+fn emit_output(result: &AffectedResult) -> Result<(), String> {
+    let (lines, json) = render_outputs(result)?;
     // Opening both first avoids publishing results when a destination is invalid.
     let mut output_file = open_destination("GITHUB_OUTPUT")?;
     let mut summary_file = open_destination("GITHUB_STEP_SUMMARY")?;
-    if let Some(file) = &mut output_file {
-        write_destination(file, &lines, "GITHUB_OUTPUT")?;
-    }
-    if let Some(file) = &mut summary_file {
-        write_destination(file, &summary, "GITHUB_STEP_SUMMARY")?;
-    }
+    append(&mut output_file, &lines, "GITHUB_OUTPUT")?;
+    append(
+        &mut summary_file,
+        &render_summary(result),
+        "GITHUB_STEP_SUMMARY",
+    )?;
     let log = if output_file.is_some() { &lines } else { &json };
-    write_destination(&mut io::stdout().lock(), log, "stdout")?;
-    Ok(())
+    write_destination(&mut io::stdout().lock(), log, "stdout")
 }
 
 fn render_summary(result: &AffectedResult) -> String {
