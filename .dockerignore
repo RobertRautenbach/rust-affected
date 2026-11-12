@@ -10,6 +10,7 @@ target/
 
 # Documentation
 README.md
+SECURITY.md
 LICENSE
 docs/
 

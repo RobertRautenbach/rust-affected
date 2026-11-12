@@ -1,4 +1,6 @@
-FROM --platform=$BUILDPLATFORM rust:1.99.1-slim-bookworm AS chef
+# Base images are pinned by digest as well as tag: a tag can be moved to
+# different content. Dependabot updates the tag and the digest together.
+FROM --platform=$BUILDPLATFORM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS chef
 RUN apt-get update && apt-get install -y --no-install-recommends \
       musl-tools \
       gcc-aarch64-linux-gnu \
@@ -38,7 +40,7 @@ RUN TARGET="$(cat /rust-target)" && \
 # cargo fetches git dependencies by spawning the git CLI (the smoke test covers
 # that configuration). This RUN executes on the target platform, so the release
 # build needs QEMU for the arm64 image.
-FROM rust:1.99.1-alpine3.23
+FROM rust:1.99.1-alpine3.23@sha256:51e1b72c7f236093c084f6e3051239f033fba9e4c0c1430cc2ed479d0a3bd14c
 # Use the installed toolchain even when the checkout contains rust-toolchain.toml.
 # Derive the pin from the base image so dependency updates keep it in sync.
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION} RUSTUP_AUTO_INSTALL=0
