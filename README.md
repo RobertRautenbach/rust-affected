@@ -41,7 +41,7 @@ jobs:
           quotepath: false
           output_renamed_files_as_deleted_and_added: true
 
-      - uses: robertrautenbach/rust-affected@v5.0.0
+      - uses: robertrautenbach/rust-affected@v5.0.1
         id: affected
         with:
           changed_files_json: ${{ steps.changed.outputs.all_modified_files }}

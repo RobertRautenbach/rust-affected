@@ -68,4 +68,4 @@ outputs:
 
 runs:
   using: docker
-  image: 'docker://ghcr.io/robertrautenbach/rust-affected:v5.0.0@sha256:3558edf88c4d8263f02f902275c26639afacc27923960ef0ab185ddf7eee8949'
+  image: 'docker://ghcr.io/robertrautenbach/rust-affected:v5.0.1@sha256:dd9d9ed4613a28177458f1688c6a52241e192c387ec4e6d90362829845cacd42'
