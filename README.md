@@ -28,11 +28,11 @@ jobs:
       libraries: ${{ steps.affected.outputs.affected_libraries }}
       binaries: ${{ steps.affected.outputs.affected_binaries }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: tj-actions/changed-files@v47
+      - uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
         id: changed
         with:
           json: true
@@ -61,7 +61,7 @@ jobs:
       matrix:
         package: ${{ fromJSON(needs.affected.outputs.libraries) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - env:
@@ -77,7 +77,7 @@ jobs:
       matrix:
         package: ${{ fromJSON(needs.affected.outputs.binaries) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - env:
@@ -86,6 +86,8 @@ jobs:
 ```
 
 Empty lists skip their test jobs. Packages with both a library and a binary appear only in the binary list, where both are tested.
+
+**Pinning.** A full version tag, as used above, is an immutable release: it cannot be moved. A major tag such as `@v5` follows the latest release of that major version. A full commit SHA is the strongest pin. Do not use `@main`: between a merge and the next release it can pair new inputs with the previous image. The other actions above are pinned to commit SHAs because a tag can be moved to different code; keep them current with Dependabot or a similar tool.
 
 > **Safety:** By default the action runs Cargo from outside the checkout, so the repository's `.cargo/config.toml` is not read. A pull request can use that file to make Cargo run arbitrary programs. A `rust-toolchain.toml` is never used: the action runs its own pinned toolchain.
 >
@@ -101,16 +103,24 @@ The `tj-actions/changed-files` settings above matter:
 To build the list with git alone, use NUL-separated output so that no name is quoted or split:
 
 ```yaml
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - id: changed
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          set -euo pipefail
           files=$(git diff --name-only --no-renames -z "$BASE" "$HEAD" | jq -Rsc 'split("\u0000") | map(select(. != ""))')
           echo "files=$files" >> "$GITHUB_OUTPUT"
 ```
 
-`--no-renames` lists a renamed file as a deletion and an addition, so both paths are included. The checkout needs enough history to contain both commits.
+Keep `set -euo pipefail`. Without it a failed `git diff` is hidden by `jq`, the step reports `[]`, and every test job is skipped.
+
+`--no-renames` lists a renamed file as a deletion and an addition, so both paths are included. The checkout needs enough history to contain both commits; `fetch-depth: 0` fetches all of it.
 
 ## Configure shared files
 
