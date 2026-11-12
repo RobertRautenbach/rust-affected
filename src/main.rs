@@ -30,12 +30,38 @@ fn format_annotation(level: &str, message: &str) -> String {
     format!("::{level}::{escaped}")
 }
 
-fn input(name: &str) -> Result<Vec<String>, String> {
-    let value = env::var_os(name)
+fn text(name: &str) -> Result<String, String> {
+    env::var_os(name)
         .unwrap_or_default()
         .into_string()
-        .map_err(|_| format!("{name} is not valid UTF-8"))?;
-    Ok(value.split_whitespace().map(String::from).collect())
+        .map_err(|_| format!("{name} is not valid UTF-8"))
+}
+
+fn input(name: &str) -> Result<Vec<String>, String> {
+    Ok(text(name)?.split_whitespace().map(String::from).collect())
+}
+
+/// Changed paths arrive as a JSON array, so each element is one exact path:
+/// nothing is split on whitespace, unquoted or otherwise interpreted here.
+/// An empty array is valid but worth a warning.
+fn changed_files() -> Result<Vec<String>, String> {
+    let value = text("CHANGED_FILES_JSON")?;
+    // An absent value is a broken or unmigrated workflow, not "nothing changed".
+    if value.trim().is_empty() {
+        return Err(
+            "changed_files_json is required: pass a JSON array of paths, or [] when nothing changed"
+                .into(),
+        );
+    }
+    let files: Vec<String> = serde_json::from_str(&value)
+        .map_err(|error| format!("changed_files_json must be a JSON array of strings: {error}"))?;
+    if files.is_empty() {
+        annotation(
+            "warning",
+            "changed_files_json is empty; no files will be attributed. If files did change, check the step producing changed_files_json. Workspace and configuration validation still run.",
+        )?;
+    }
+    Ok(files)
 }
 
 fn flag(name: &str) -> Result<bool, String> {
@@ -49,15 +75,10 @@ fn flag(name: &str) -> Result<bool, String> {
 
 fn run() -> Result<(), String> {
     let ignore_cargo_config = flag("IGNORE_CARGO_CONFIG")?;
-    let changed_files = input("CHANGED_FILES")?;
     let force_triggers = input("FORCE_TRIGGERS")?;
     let excluded: HashSet<String> = input("EXCLUDED_MEMBERS")?.into_iter().collect();
-    if changed_files.is_empty() {
-        annotation(
-            "warning",
-            "changed_files is empty; no files will be attributed. If files did change, check the step producing changed_files. Workspace and configuration validation still run.",
-        )?;
-    }
+    // Last, so that its empty-list warning never precedes another input's error.
+    let changed_files = changed_files()?;
     let graph = load_graph(ignore_cargo_config)?;
     let result = compute_affected(&graph, &changed_files, &force_triggers, &excluded)
         .map_err(|error| error.to_string())?;

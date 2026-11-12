@@ -8,15 +8,16 @@ branding:
   color: orange
 
 inputs:
-  changed_files:
+  changed_files_json:
     description: >
-      Space- or newline-separated list of changed file paths relative to the
-      workspace root, including deletions and both paths of renames. Leading ./
-      and absolute paths beneath the workspace root are accepted, as are paths
-      quoted by git (core.quotePath). Filenames containing whitespace are
-      unsupported. Typically produced by a prior step such as
-      `git diff --name-only`, `tj-actions/changed-files`, or
-      `dorny/paths-filter`.
+      JSON array of changed file paths relative to the workspace root, such as
+      ["src/lib.rs","docs/my file.md"], including deletions and both paths of
+      renames. Use [] when nothing changed; a missing or blank value fails the
+      action. Each element is one exact path: nothing is split or unquoted, so
+      any filename is supported. Leading ./ and absolute paths beneath the
+      workspace root are accepted. Typically produced by
+      `tj-actions/changed-files` with `json: true` or `dorny/paths-filter`
+      with `list-files: json`.
     required: true
   force_triggers:
     description: >
@@ -68,7 +69,7 @@ runs:
   using: docker
   image: 'docker://ghcr.io/robertrautenbach/rust-affected:v4.4.0@sha256:bd9448a2b5a2bb8578c1422c10847ecb9a5b53af0416cc724fa19c3ca21912f2'
   env:
-    CHANGED_FILES: ${{ inputs.changed_files }}
+    CHANGED_FILES_JSON: ${{ inputs.changed_files_json }}
     FORCE_TRIGGERS: ${{ inputs.force_triggers }}
     EXCLUDED_MEMBERS: ${{ inputs.excluded_members }}
     IGNORE_CARGO_CONFIG: ${{ inputs.ignore_cargo_config }}
