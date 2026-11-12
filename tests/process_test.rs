@@ -38,12 +38,16 @@ fn command(cwd: &Path) -> Command {
     for key in [
         "GITHUB_OUTPUT",
         "GITHUB_STEP_SUMMARY",
+        "GITHUB_WORKSPACE",
         "CHANGED_FILES_JSON",
-        r#"["FORCE_TRIGGERS"]"#,
+        "FORCE_TRIGGERS",
         "EXCLUDED_PACKAGES",
         "IGNORE_CARGO_CONFIG",
         "TRUST_CARGO_CONFIG",
-        "CHANGED_FILES_JSON",
+        "INPUT_CHANGED_FILES_JSON",
+        "INPUT_FORCE_TRIGGERS",
+        "INPUT_EXCLUDED_PACKAGES",
+        "INPUT_TRUST_CARGO_CONFIG",
         "INPUT_CHANGED_FILES",
         "INPUT_EXCLUDED_MEMBERS",
         "INPUT_IGNORE_CARGO_CONFIG",
@@ -191,9 +195,10 @@ const MEMBER_OUTPUT: &str = "{\"affected_binaries\":[],\"affected_libraries\":[\
 
 const CHANGED_MEMBER: (&str, &str) = ("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#);
 
+/// A locked workspace whose `.cargo/config.toml` makes Cargo run a program
+/// that leaves a marker. Returns the workspace and the marker's path.
 #[cfg(unix)]
-#[test]
-fn repository_cargo_config_is_read_only_when_trusted() {
+fn workspace_with_planted_program() -> (TempDir, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let scratch = workspace();
     std::fs::write(scratch.path().join("Cargo.lock"), MEMBER_LOCK).unwrap();
@@ -214,6 +219,125 @@ fn repository_cargo_config_is_read_only_when_trusted() {
         format!("[build]\nrustc = '{}'\n", program.display()),
     )
     .unwrap();
+    (scratch, marker)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_job_variable_cannot_replace_an_input() {
+    // The runner sets INPUT_<NAME> for every declared input, so a variable the
+    // job happens to define under the bare name must not be read instead.
+    let (scratch, marker) = workspace_with_planted_program();
+    for input in ["false", ""] {
+        let output = command(scratch.path())
+            .envs([
+                CHANGED_MEMBER,
+                ("INPUT_TRUST_CARGO_CONFIG", input),
+                ("TRUST_CARGO_CONFIG", "true"),
+            ])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), MEMBER_OUTPUT);
+        assert!(!marker.exists(), "program ran with input {input:?}");
+    }
+    // An input left empty stays empty.
+    let changed = ("INPUT_CHANGED_FILES_JSON", r#"["lib-utils/src/lib.rs"]"#);
+    let output = run(
+        &fixture(),
+        &[
+            changed,
+            ("INPUT_EXCLUDED_PACKAGES", ""),
+            ("EXCLUDED_PACKAGES", "tools/"),
+            ("INPUT_FORCE_TRIGGERS", ""),
+            ("FORCE_TRIGGERS", "**"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["force_all"], false);
+    assert_eq!(
+        json["affected_binaries"],
+        serde_json::json!(["app-alpha", "app-beta", "tool-alpha"])
+    );
+    assert_error(
+        &run(
+            &fixture(),
+            &[
+                ("INPUT_CHANGED_FILES_JSON", ""),
+                ("CHANGED_FILES_JSON", r#"["lib-utils/src/lib.rs"]"#),
+            ],
+        ),
+        "changed_files_json is required",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cargo_home_inside_an_untrusted_checkout_is_refused() {
+    // Cargo reads $CARGO_HOME/config.toml wherever it starts.
+    let (scratch, marker) = workspace_with_planted_program();
+    let home = scratch.path().join(".cargo");
+    let home = home.to_str().unwrap();
+    let message = "is inside the checkout, so Cargo would read configuration from the repository although trust_cargo_config is false";
+    for directory in ["", "member"] {
+        let output = command(&scratch.path().join(directory))
+            .envs([CHANGED_MEMBER, ("CARGO_HOME", home)])
+            .output()
+            .unwrap();
+        assert_error(&output, message);
+        assert!(!marker.exists(), "program ran from {directory:?}");
+    }
+    // A home that does not exist yet is refused too: the pull request could add it.
+    let absent = scratch.path().join("member/absent-home");
+    assert_error(
+        &run(
+            scratch.path(),
+            &[CHANGED_MEMBER, ("CARGO_HOME", absent.to_str().unwrap())],
+        ),
+        message,
+    );
+    // GITHUB_WORKSPACE names the checkout even when no manifest sits at its top.
+    let outer = tempfile::tempdir().unwrap();
+    let inner = outer.path().join("crates");
+    std::fs::create_dir_all(inner.join("src")).unwrap();
+    std::fs::write(
+        inner.join("Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(inner.join("src/lib.rs"), "").unwrap();
+    let sibling = outer.path().join("cargo-home");
+    let envs = [
+        ("CHANGED_FILES_JSON", r#"["src/lib.rs"]"#),
+        ("CARGO_HOME", sibling.to_str().unwrap()),
+    ];
+    assert!(run(&inner, &envs).status.success());
+    let output = command(&inner)
+        .envs(envs)
+        .env("GITHUB_WORKSPACE", outer.path())
+        .output()
+        .unwrap();
+    assert_error(&output, message);
+    // Trusted, the checkout's configuration is meant to be read.
+    let output = command(scratch.path())
+        .envs([
+            CHANGED_MEMBER,
+            ("CARGO_HOME", home),
+            ("TRUST_CARGO_CONFIG", "true"),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_cargo_config_is_read_only_when_trusted() {
+    let (scratch, marker) = workspace_with_planted_program();
     // Untrusted unless stated: the configured program never runs, from the root
     // or from a member. The switch removed in v5 cannot turn the isolation off.
     for (directory, extra) in [
@@ -1116,8 +1240,10 @@ fn unavailable_sources_fail_without_publishing_partial_results() {
             let summary_path = scratch.path().join("summary");
             std::fs::write(&output_path, "sentinel\n").unwrap();
             std::fs::write(&summary_path, "sentinel\n").unwrap();
+            // An empty Cargo home, kept outside the checkout as isolation requires.
+            let home = tempfile::tempdir().unwrap();
             let output = command(scratch.path())
-                .env("CARGO_HOME", scratch.path().join("cargo-home"))
+                .env("CARGO_HOME", home.path())
                 .env("CHANGED_FILES_JSON", json(changed))
                 .env("GITHUB_OUTPUT", &output_path)
                 .env("GITHUB_STEP_SUMMARY", &summary_path)
@@ -1189,7 +1315,9 @@ fn git_source_patch_uses_cargos_selected_workspace_identity() {
     std::fs::write(scratch.path().join("app/src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(scratch.path().join("app/Cargo.toml"), format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nrenamed = {{ package = \"member\", git = \"{url}\" }}\n")).unwrap();
     std::fs::write(scratch.path().join("Cargo.toml"), format!("[workspace]\nmembers = [\"member\", \"app\"]\nresolver = \"2\"\n[patch.\"{url}\"]\nmember = {{ path = \"member\" }}\n")).unwrap();
-    let cache = scratch.path().join("cargo-home");
+    // An empty Cargo home, kept outside the checkout as isolation requires.
+    let home = tempfile::tempdir().unwrap();
+    let cache = home.path().join("cargo-home");
     let metadata = Command::new(env!("CARGO"))
         .current_dir(scratch.path())
         .args(["metadata", "--format-version", "1", "--all-features"])

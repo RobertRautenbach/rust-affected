@@ -69,8 +69,3 @@ outputs:
 runs:
   using: docker
   image: 'docker://ghcr.io/robertrautenbach/rust-affected:v5.0.0@sha256:3558edf88c4d8263f02f902275c26639afacc27923960ef0ab185ddf7eee8949'
-  env:
-    CHANGED_FILES_JSON: ${{ inputs.changed_files_json }}
-    FORCE_TRIGGERS: ${{ inputs.force_triggers }}
-    EXCLUDED_PACKAGES: ${{ inputs.excluded_packages }}
-    TRUST_CARGO_CONFIG: ${{ inputs.trust_cargo_config }}

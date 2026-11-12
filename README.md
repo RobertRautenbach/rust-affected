@@ -174,6 +174,8 @@ Package lists are JSON arrays, such as `["shared-lib","api-server"]`. Use `fromJ
 - **Shared files need care.** Detection uses package directories and current Cargo dependencies. It cannot discover every build-script input or reconstruct removed packages. Use force triggers for shared inputs inside the workspace; handle outside files in your workflow.
 - **Runner requirement:** Run the detection job on Linux, such as `ubuntu-latest`. Separate build and test jobs can use any operating system and their own Rust toolchain.
 - **Cargo may download dependencies.** An outdated lockfile fails the action. A missing lockfile may be created.
+- **The job's environment reaches Cargo.** Variables such as `CARGO_HOME`, `RUSTC`, `RUSTC_WRAPPER` and `CARGO_BUILD_*` set on the workflow or job apply inside the action. A `CARGO_HOME` inside the checkout fails the action unless `trust_cargo_config` is `true`, because Cargo would read the repository's configuration from it.
+- **Inputs come only from `with:`.** A workflow or job variable named like an input, such as `TRUST_CARGO_CONFIG`, does not replace it.
 
 Invalid configuration or Cargo failures fail the action rather than return partial results.
 
