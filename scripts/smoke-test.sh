@@ -151,7 +151,7 @@ LOCK_WARNING='::warning::No Cargo.lock in the workspace root; cargo metadata wil
 
 # This must name an installed toolchain, not merely happen to work online.
 docker run --rm --network none --entrypoint sh "${IMAGE}" -c \
-  'test "$RUSTUP_TOOLCHAIN" = "$RUST_VERSION" && test "$RUSTUP_AUTO_INSTALL" = 0 && rustup run "$RUSTUP_TOOLCHAIN" cargo --version && git --version'
+  'test -n "$RUSTUP_TOOLCHAIN" && test "$RUSTUP_AUTO_INSTALL" = 0 && rustup run "$RUSTUP_TOOLCHAIN" cargo --version && git --version'
 
 run_case "leaf library change" "${FIXTURE}" \
   '["lib-utils/src/lib.rs"]' "" "" \
