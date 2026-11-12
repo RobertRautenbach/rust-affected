@@ -40,10 +40,13 @@ fn command(cwd: &Path) -> Command {
         "GITHUB_STEP_SUMMARY",
         "CHANGED_FILES_JSON",
         r#"["FORCE_TRIGGERS"]"#,
-        "EXCLUDED_MEMBERS",
+        "EXCLUDED_PACKAGES",
         "IGNORE_CARGO_CONFIG",
         "TRUST_CARGO_CONFIG",
         "CHANGED_FILES_JSON",
+        "INPUT_CHANGED_FILES",
+        "INPUT_EXCLUDED_MEMBERS",
+        "INPUT_IGNORE_CARGO_CONFIG",
     ] {
         cmd.env_remove(key);
     }
@@ -119,7 +122,7 @@ fn external_targets_warn_without_changing_attribution() {
                 &[
                     ("CHANGED_FILES_JSON", &json(changed)),
                     ("FORCE_TRIGGERS", trigger),
-                    ("EXCLUDED_MEMBERS", excluded),
+                    ("EXCLUDED_PACKAGES", excluded),
                 ],
             );
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -139,9 +142,9 @@ fn external_targets_warn_without_changing_attribution() {
             assert_eq!(
                 result,
                 serde_json::json!({
-                    "changed_crates": [],
-                    "affected_library_members": [],
-                    "affected_binary_members": [],
+                    "changed_packages": [],
+                    "affected_libraries": [],
+                    "affected_binaries": [],
                     "force_all": !trigger.is_empty(),
                 })
             );
@@ -184,7 +187,7 @@ fn unmatchable_trigger_fails_even_without_changes() {
 }
 
 const MEMBER_LOCK: &str = "version = 4\n\n[[package]]\nname = \"member\"\nversion = \"0.1.0\"\n";
-const MEMBER_OUTPUT: &str = "{\"affected_binary_members\":[],\"affected_library_members\":[\"member\"],\"changed_crates\":[\"member\"],\"force_all\":false}\n";
+const MEMBER_OUTPUT: &str = "{\"affected_binaries\":[],\"affected_libraries\":[\"member\"],\"changed_packages\":[\"member\"],\"force_all\":false}\n";
 
 const CHANGED_MEMBER: (&str, &str) = ("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#);
 
@@ -370,7 +373,7 @@ fn uncovered_workspace_files_warn_without_changing_results() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "{\"affected_binary_members\":[],\"affected_library_members\":[],\"changed_crates\":[],\"force_all\":false}\n"
+        "{\"affected_binaries\":[],\"affected_libraries\":[],\"changed_packages\":[],\"force_all\":false}\n"
     );
 }
 
@@ -412,7 +415,7 @@ fn json_paths_are_exact_strings() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "{\"affected_binary_members\":[],\"affected_library_members\":[],\"changed_crates\":[],\"force_all\":false}\n"
+        "{\"affected_binaries\":[],\"affected_libraries\":[],\"changed_packages\":[],\"force_all\":false}\n"
     );
 }
 
@@ -465,9 +468,85 @@ fn an_empty_array_is_valid_and_still_warns() {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "{\"affected_binary_members\":[],\"affected_library_members\":[],\"changed_crates\":[],\"force_all\":false}\n"
+            "{\"affected_binaries\":[],\"affected_libraries\":[],\"changed_packages\":[],\"force_all\":false}\n"
         );
     }
+}
+
+#[test]
+fn inputs_removed_in_v5_fail_instead_of_being_ignored() {
+    // The runner hands every `with:` key to the container as INPUT_<NAME>,
+    // including ones action.yml no longer declares.
+    let changed = ("CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#);
+    for (variable, advice) in [
+        (
+            "INPUT_CHANGED_FILES",
+            "changed_files (use changed_files_json, a JSON array of paths)",
+        ),
+        (
+            "INPUT_EXCLUDED_MEMBERS",
+            "excluded_members (renamed to excluded_packages)",
+        ),
+        (
+            "INPUT_IGNORE_CARGO_CONFIG",
+            "ignore_cargo_config (Cargo configuration is now unread unless trust_cargo_config is true)",
+        ),
+    ] {
+        for value in ["lib-utils", "false"] {
+            let output = run(&fixture(), &[changed, (variable, value)]);
+            assert_error(&output, "inputs removed in v5 were passed: ");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(advice), "{stderr}");
+            assert!(
+                stderr.contains("See \"Migrating from v4\" in the README."),
+                "{stderr}"
+            );
+        }
+    }
+    // Every removed input that was passed is named, in one error, before anything else is read.
+    let output = run(
+        &fixture(),
+        &[
+            ("INPUT_EXCLUDED_MEMBERS", "tools/"),
+            ("INPUT_CHANGED_FILES", "lib-core/src/lib.rs"),
+            ("FORCE_TRIGGERS", "[abc"),
+        ],
+    );
+    assert_error(
+        &output,
+        "inputs removed in v5 were passed: changed_files (use changed_files_json, a JSON array of paths); excluded_members (renamed to excluded_packages). See",
+    );
+    // A blank value sets nothing, so it is not worth failing over, and the
+    // current inputs' own INPUT_ variables are not mistaken for removed ones.
+    let output = run(
+        &fixture(),
+        &[
+            changed,
+            ("INPUT_CHANGED_FILES", ""),
+            ("INPUT_EXCLUDED_MEMBERS", " \n"),
+            ("INPUT_IGNORE_CARGO_CONFIG", ""),
+            ("INPUT_CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#),
+            ("INPUT_EXCLUDED_PACKAGES", "tools/"),
+            ("INPUT_TRUST_CARGO_CONFIG", "false"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr, "");
+    // What the runner really sets for a migrated workflow: names that merely
+    // begin like a removed one, and nothing else.
+    let output = run(
+        &fixture(),
+        &[
+            changed,
+            ("INPUT_CHANGED_FILES_JSON", r#"["lib-core/src/lib.rs"]"#),
+            ("INPUT_EXCLUDED_PACKAGES", "tools/"),
+            ("INPUT_TRUST_CARGO_CONFIG", "false"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr, "");
 }
 
 #[test]
@@ -481,13 +560,13 @@ fn warnings_are_grouped_and_do_not_pollute_json() {
             vec![
                 ("CHANGED_FILES_JSON", r#"["../x","../x","/outside/file"]"#),
                 ("FORCE_TRIGGERS", "**"),
-                ("EXCLUDED_MEMBERS", "tools unknown"),
+                ("EXCLUDED_PACKAGES", "tools unknown"),
             ],
-            vec!["changed file", "excluded_members"],
+            vec!["changed file", "excluded_packages"],
         ),
         (
-            vec![("CHANGED_FILES_JSON", "[]"), ("EXCLUDED_MEMBERS", "tools")],
-            vec!["changed_files_json is empty", "excluded_members"],
+            vec![("CHANGED_FILES_JSON", "[]"), ("EXCLUDED_PACKAGES", "tools")],
+            vec!["changed_files_json is empty", "excluded_packages"],
         ),
     ] {
         let output = run(&fixture(), &envs);
@@ -506,7 +585,7 @@ fn warnings_are_grouped_and_do_not_pollute_json() {
         }
         let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(json["force_all"], false);
-        assert_eq!(json["changed_crates"], serde_json::json!([]));
+        assert_eq!(json["changed_packages"], serde_json::json!([]));
     }
 }
 
@@ -514,7 +593,7 @@ fn warnings_are_grouped_and_do_not_pollute_json() {
 #[test]
 fn every_input_rejects_invalid_utf8_even_without_changes() {
     use std::os::unix::ffi::OsStrExt;
-    for key in ["CHANGED_FILES_JSON", "FORCE_TRIGGERS", "EXCLUDED_MEMBERS"] {
+    for key in ["CHANGED_FILES_JSON", "FORCE_TRIGGERS", "EXCLUDED_PACKAGES"] {
         for changed in ["", "lib-core/src/lib.rs"] {
             let output = command(&fixture())
                 .env("CHANGED_FILES_JSON", json(changed))
@@ -668,7 +747,7 @@ fn cargo_config_warning_commands_are_not_forwarded() {
         // Cargo only warns about this configuration when it reads it.
         .env("TRUST_CARGO_CONFIG", "true")
         .env("CHANGED_FILES_JSON", r#"["member/src/lib.rs"]"#)
-        .env("EXCLUDED_MEMBERS", "unknown")
+        .env("EXCLUDED_PACKAGES", "unknown")
         .env("GITHUB_OUTPUT", &output_path)
         .env("GITHUB_STEP_SUMMARY", &summary_path)
         .output()
@@ -677,12 +756,12 @@ fn cargo_config_warning_commands_are_not_forwarded() {
     assert!(output.status.success(), "{stderr}");
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
     assert!(
-        stderr.starts_with("::warning::excluded_members entries matched no workspace member:"),
+        stderr.starts_with("::warning::excluded_packages entries matched no workspace package:"),
         "{stderr}"
     );
     assert_eq!(
         output.stdout,
-        b"changed_crates=[\"member\"]\naffected_library_members=[\"member\"]\naffected_binary_members=[]\nforce_all=false\n"
+        b"changed_packages=[\"member\"]\naffected_libraries=[\"member\"]\naffected_binaries=[]\nforce_all=false\n"
     );
     assert_eq!(std::fs::read(output_path).unwrap(), output.stdout);
     assert!(
@@ -840,7 +919,7 @@ cat "$FAKE_METADATA"
             );
             assert_eq!(output.stderr, Vec::<u8>::new());
             let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(json["changed_crates"], serde_json::json!(["lib-core"]));
+            assert_eq!(json["changed_packages"], serde_json::json!(["lib-core"]));
         } else {
             assert_error(&output, "workspace member 'missing-package-id' not found");
         }
@@ -890,9 +969,9 @@ fn results_are_echoed_and_summary_is_appended_in_both_modes() {
                 "| **Changed** |",
                 "| **Affected libraries** |",
                 "| **Affected binaries** |",
-                "### Changed crates",
-                "### Affected library members",
-                "### Affected binary members",
+                "### Changed packages",
+                "### Affected libraries",
+                "### Affected binaries",
             ] {
                 assert!(summary.contains(text), "{summary}");
             }
@@ -930,7 +1009,7 @@ fn output_bytes_match_stage_three_in_both_modes() {
             cmd.env("CARGO_HOME", scratch.path().join("cargo-home"));
             cmd.env("CHANGED_FILES_JSON", json(changed))
                 .env("FORCE_TRIGGERS", trigger)
-                .env("EXCLUDED_MEMBERS", excluded)
+                .env("EXCLUDED_PACKAGES", excluded)
                 .env("GITHUB_STEP_SUMMARY", &summary_path);
             if file_output {
                 cmd.env("GITHUB_OUTPUT", &output_path);
@@ -1139,10 +1218,7 @@ fn git_source_patch_uses_cargos_selected_workspace_identity() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        result["affected_binary_members"],
-        serde_json::json!(["app"])
-    );
+    assert_eq!(result["affected_binaries"], serde_json::json!(["app"]));
 }
 
 #[cfg(unix)]

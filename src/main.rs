@@ -73,10 +73,47 @@ fn flag(name: &str) -> Result<bool, String> {
     }
 }
 
+/// Inputs removed in v5, and what to do instead.
+const REMOVED_INPUTS: [(&str, &str); 3] = [
+    (
+        "changed_files",
+        "use changed_files_json, a JSON array of paths",
+    ),
+    ("excluded_members", "renamed to excluded_packages"),
+    (
+        "ignore_cargo_config",
+        "Cargo configuration is now unread unless trust_cargo_config is true",
+    ),
+];
+
+/// Fail when a workflow still passes an input that no longer exists.
+///
+/// The runner only warns about an undeclared input, and still hands it to the
+/// container as `INPUT_<NAME>`. Left alone, a v4 workflow's `excluded_members`
+/// would be ignored and its packages would quietly return to the outputs.
+fn reject_removed_inputs() -> Result<(), String> {
+    let passed: Vec<String> = REMOVED_INPUTS
+        .iter()
+        .filter(|(name, _)| {
+            env::var_os(format!("INPUT_{}", name.to_uppercase()))
+                .is_some_and(|value| !value.to_string_lossy().trim().is_empty())
+        })
+        .map(|(name, advice)| format!("{name} ({advice})"))
+        .collect();
+    if passed.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "inputs removed in v5 were passed: {}. See \"Migrating from v4\" in the README.",
+        passed.join("; ")
+    ))
+}
+
 fn run() -> Result<(), String> {
+    reject_removed_inputs()?;
     let trust_cargo_config = flag("TRUST_CARGO_CONFIG")?;
     let force_triggers = input("FORCE_TRIGGERS")?;
-    let excluded: HashSet<String> = input("EXCLUDED_MEMBERS")?.into_iter().collect();
+    let excluded: HashSet<String> = input("EXCLUDED_PACKAGES")?.into_iter().collect();
     // Last, so that its empty-list warning never precedes another input's error.
     let changed_files = changed_files()?;
     let graph = load_graph(trust_cargo_config)?;
@@ -271,7 +308,7 @@ fn emit_warnings(warnings: &[Warning]) -> Result<(), String> {
     })?;
     warn_about(&exclusions, || {
         format!(
-            "excluded_members entries matched no workspace member: {exclusions:?}. Names match crate names exactly; use a trailing slash such as 'tools/' to match a directory."
+            "excluded_packages entries matched no workspace package: {exclusions:?}. Names match package names exactly; use a trailing slash such as 'tools/' to match a directory."
         )
     })?;
     warn_about(&external_targets, || {
@@ -306,9 +343,9 @@ fn write_destination(writer: &mut impl Write, contents: &str, name: &str) -> Res
 /// The action's historical output order; any other field follows alphabetically.
 fn field_rank(key: &str) -> u8 {
     match key {
-        "changed_crates" => 0,
-        "affected_library_members" => 1,
-        "affected_binary_members" => 2,
+        "changed_packages" => 0,
+        "affected_libraries" => 1,
+        "affected_binaries" => 2,
         "force_all" => 3,
         _ => 4,
     }
@@ -362,16 +399,16 @@ fn render_summary(result: &AffectedResult) -> String {
     }
     summary.push_str("## rust-affected\n\n| | Crates |\n|---|---|\n");
     let rows = [
-        ("Changed", "Changed crates", &result.changed_crates),
+        ("Changed", "Changed packages", &result.changed_packages),
         (
             "Affected libraries",
-            "Affected library members",
-            &result.affected_library_members,
+            "Affected libraries",
+            &result.affected_libraries,
         ),
         (
             "Affected binaries",
-            "Affected binary members",
-            &result.affected_binary_members,
+            "Affected binaries",
+            &result.affected_binaries,
         ),
     ];
     for (label, _, names) in rows {

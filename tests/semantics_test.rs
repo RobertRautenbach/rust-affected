@@ -49,9 +49,9 @@ fn force_all_filters_external_packages_by_identity() {
         &[],
     );
     assert!(result.force_all);
-    assert_eq!(result.changed_crates, Vec::<String>::new());
-    assert_eq!(result.affected_library_members, ["consumer", "shared"]);
-    assert_eq!(result.affected_binary_members, Vec::<String>::new());
+    assert_eq!(result.changed_packages, Vec::<String>::new());
+    assert_eq!(result.affected_libraries, ["consumer", "shared"]);
+    assert_eq!(result.affected_binaries, Vec::<String>::new());
     assert_eq!(result.warnings, Vec::<rust_affected::Warning>::new());
 }
 
@@ -64,9 +64,9 @@ fn excluding_a_member_does_not_leak_an_external_namesake() {
         &["shared"],
     );
     assert!(result.force_all);
-    assert_eq!(result.changed_crates, Vec::<String>::new());
-    assert_eq!(result.affected_library_members, ["consumer"]);
-    assert_eq!(result.affected_binary_members, Vec::<String>::new());
+    assert_eq!(result.changed_packages, Vec::<String>::new());
+    assert_eq!(result.affected_libraries, ["consumer"]);
+    assert_eq!(result.affected_binaries, Vec::<String>::new());
     assert_eq!(result.warnings, Vec::<rust_affected::Warning>::new());
 }
 
@@ -83,9 +83,9 @@ fn default_result_is_empty_without_warnings_or_force() {
         AffectedResult {
             warnings: vec![],
             force_all: false,
-            changed_crates: vec![],
-            affected_library_members: vec![],
-            affected_binary_members: vec![],
+            changed_packages: vec![],
+            affected_libraries: vec![],
+            affected_binaries: vec![],
         }
     );
 }
@@ -102,9 +102,9 @@ fn serialized_result_has_only_the_four_output_fields() {
     assert_eq!(
         serde_json::to_value(&result).unwrap(),
         serde_json::json!({
-            "changed_crates": ["sub-lib"],
-            "affected_library_members": ["independent-lib", "sub-lib"],
-            "affected_binary_members": ["root-app"],
+            "changed_packages": ["sub-lib"],
+            "affected_libraries": ["independent-lib", "sub-lib"],
+            "affected_binaries": ["root-app"],
             "force_all": true,
         })
     );
@@ -140,9 +140,9 @@ fn compute(name: &str, files: &[&str], triggers: &[&str], excluded: &[&str]) -> 
 }
 
 fn assert_lists(result: &AffectedResult, changed: &[&str], libraries: &[&str], binaries: &[&str]) {
-    assert_eq!(result.changed_crates, changed);
-    assert_eq!(result.affected_library_members, libraries);
-    assert_eq!(result.affected_binary_members, binaries);
+    assert_eq!(result.changed_packages, changed);
+    assert_eq!(result.affected_libraries, libraries);
+    assert_eq!(result.affected_binaries, binaries);
     assert!(!result.force_all);
 }
 
@@ -354,8 +354,8 @@ fn directory_force_triggers_match_the_directory_and_descendants_only() {
         ] {
             let result = compute("workspace", &[file], &[trigger], &["app-alpha"]);
             assert!(result.force_all, "{file} with {trigger}");
-            assert_eq!(result.changed_crates, Vec::<String>::new());
-            assert_eq!(result.affected_binary_members, ["app-beta", "tool-alpha"]);
+            assert_eq!(result.changed_packages, Vec::<String>::new());
+            assert_eq!(result.affected_binaries, ["app-beta", "tool-alpha"]);
         }
         for file in [
             "infra-extra",
@@ -486,7 +486,7 @@ fn workspace_wide_files_warn_only_when_nothing_covers_them() {
     }
     // A root package owns the root files, so they select it instead.
     let owned = compute("root-package", &["Cargo.lock", "Cargo.toml"], &[], &[]);
-    assert_eq!(owned.changed_crates, ["root-app"]);
+    assert_eq!(owned.changed_packages, ["root-app"]);
     assert_eq!(owned.warnings, []);
 }
 

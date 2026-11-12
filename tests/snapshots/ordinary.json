@@ -1,1 +1,1 @@
-{"affected_binary_members":["root-app"],"affected_library_members":["sub-lib"],"changed_crates":["root-app","sub-lib"],"force_all":false}
+{"affected_binaries":["root-app"],"affected_libraries":["sub-lib"],"changed_packages":["root-app","sub-lib"],"force_all":false}

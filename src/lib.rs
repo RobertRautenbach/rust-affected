@@ -75,9 +75,9 @@ pub struct AffectedResult {
     #[serde(skip)]
     pub warnings: Vec<Warning>,
     pub force_all: bool,
-    pub changed_crates: Vec<String>,
-    pub affected_library_members: Vec<String>,
-    pub affected_binary_members: Vec<String>,
+    pub changed_packages: Vec<String>,
+    pub affected_libraries: Vec<String>,
+    pub affected_binaries: Vec<String>,
 }
 
 // Lexical normalization preserves deleted paths and does not resolve symlinks.
@@ -194,7 +194,7 @@ fn warn_about_external_targets(graph: &guppy::graph::PackageGraph, warnings: &mu
 }
 
 /// The members matched by the exclusions, warning about entries that match none.
-fn excluded_members<S: BuildHasher>(
+fn excluded_packages<S: BuildHasher>(
     graph: &guppy::graph::PackageGraph,
     excluded: &HashSet<String, S>,
     warnings: &mut Vec<Warning>,
@@ -220,15 +220,15 @@ fn excluded_members<S: BuildHasher>(
 fn report(pkg: &guppy::graph::PackageMetadata<'_>, changed: bool, result: &mut AffectedResult) {
     let name = pkg.name().to_string();
     if changed {
-        result.changed_crates.push(name.clone());
+        result.changed_packages.push(name.clone());
     }
     if pkg
         .build_targets()
         .any(|target| matches!(target.id(), guppy::graph::BuildTargetId::Binary(_)))
     {
-        result.affected_binary_members.push(name);
+        result.affected_binaries.push(name);
     } else {
-        result.affected_library_members.push(name);
+        result.affected_libraries.push(name);
     }
 }
 
@@ -274,12 +274,12 @@ fn direct_owners(
 
 /// Compute which workspace crates are affected by a set of changed files.
 ///
-/// `affected_library_members` and `affected_binary_members` are mutually
-/// exclusive: a crate with a binary target appears only in `affected_binary_members`,
-/// while pure library crates appear only in `affected_library_members`.
+/// `affected_libraries` and `affected_binaries` are mutually
+/// exclusive: a crate with a binary target appears only in `affected_binaries`,
+/// while pure library crates appear only in `affected_libraries`.
 ///
-/// `excluded` filters crate names from all three output lists (`changed_crates`,
-/// `affected_library_members`, `affected_binary_members`) but does **not** prune the
+/// `excluded` filters crate names from all three output lists (`changed_packages`,
+/// `affected_libraries`, `affected_binaries`) but does **not** prune the
 /// dependency graph traversal. An excluded crate is still traversed when resolving
 /// transitive dependents — it simply won't appear in the results.
 ///
@@ -314,7 +314,7 @@ pub fn compute_affected<S: BuildHasher>(
         .collect();
     let force_all = check_force_triggers(&normalized_files, force_triggers)?;
     warn_about_external_targets(graph, &mut warnings);
-    let excluded_ids = excluded_members(graph, excluded, &mut warnings);
+    let excluded_ids = excluded_packages(graph, excluded, &mut warnings);
     let direct_ids = direct_owners(graph, &files, force_all, &mut warnings);
     warnings.sort();
     warnings.dedup();
@@ -338,8 +338,8 @@ pub fn compute_affected<S: BuildHasher>(
             report(&pkg, direct_ids.contains(pkg.id()), &mut result);
         }
     }
-    result.changed_crates.sort();
-    result.affected_library_members.sort();
-    result.affected_binary_members.sort();
+    result.changed_packages.sort();
+    result.affected_libraries.sort();
+    result.affected_binaries.sort();
     Ok(result)
 }
