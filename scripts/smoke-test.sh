@@ -3,7 +3,9 @@
 #
 # Runs the image the way the GitHub Actions runner runs a Docker action: the
 # checkout mounted at /github/workspace, the working directory set to it, and
-# the file-command files pre-created and mounted at /github/file_commands. Each
+# the file-command files pre-created and mounted at /github/file_commands, and
+# every declared input passed as INPUT_<NAME> (trust_cargo_config defaults to
+# false, as in action.yml). Each
 # case compares GITHUB_OUTPUT with the expected lines and checks that a job
 # summary was written.
 #
@@ -55,9 +57,10 @@ run_case() {
     -e HOME=/github/home -e CARGO_HOME=/github/cargo-home -e CARGO_NET_OFFLINE=true \
     -e GITHUB_OUTPUT=/github/file_commands/set_output \
     -e GITHUB_STEP_SUMMARY=/github/file_commands/step_summary \
-    -e "CHANGED_FILES_JSON=${changed}" \
-    -e "FORCE_TRIGGERS=${force}" \
-    -e "EXCLUDED_PACKAGES=${excluded}" \
+    -e "INPUT_CHANGED_FILES_JSON=${changed}" \
+    -e "INPUT_FORCE_TRIGGERS=${force}" \
+    -e "INPUT_EXCLUDED_PACKAGES=${excluded}" \
+    -e INPUT_TRUST_CARGO_CONFIG=false \
     ${1+"$@"} \
     "${IMAGE}" 2>"${tmp}/stderr")" || rc=$?
 
@@ -97,7 +100,8 @@ run_failing_case() {
     -v "${workspace}:/github/workspace" -v "${tmp}:/github/file_commands" \
     -e HOME=/github/home -e CARGO_HOME=/github/cargo-home -e CARGO_NET_OFFLINE=true -e GITHUB_OUTPUT=/github/file_commands/set_output \
     -e GITHUB_STEP_SUMMARY=/github/file_commands/step_summary \
-    -e "CHANGED_FILES_JSON=${changed}" -e "FORCE_TRIGGERS=${force}" -e "EXCLUDED_PACKAGES=${excluded}" \
+    -e "INPUT_CHANGED_FILES_JSON=${changed}" -e "INPUT_FORCE_TRIGGERS=${force}" -e "INPUT_EXCLUDED_PACKAGES=${excluded}" \
+    -e INPUT_TRUST_CARGO_CONFIG=false \
     ${1+"$@"} "${IMAGE}" >"${tmp}/stdout" 2>"${tmp}/stderr" || rc=$?
   if [[ "${rc}" -ne 1 ]] || [[ -s "${tmp}/stdout" ]] || [[ -s "${tmp}/set_output" ]] || [[ -s "${tmp}/step_summary" ]]; then
     cat "${tmp}/stderr" >&2
@@ -326,7 +330,7 @@ for fixture in patch-selected patch-config patch-unused bridge; do
 "changed_packages=[\"resolution-core\"]
 affected_libraries=[\"resolution-core\"]
 affected_binaries=${binaries}
-force_all=false" -e "TRUST_CARGO_CONFIG=${trust}"
+force_all=false" -e "INPUT_TRUST_CARGO_CONFIG=${trust}"
 done
 # Untrusted, that [patch] is unread, the lock is stale, and the error names the file.
 run_failing_case "unread config is named when cargo fails" "${REPO_ROOT}/tests/fixtures/patch-config" \
@@ -344,9 +348,9 @@ run_case "consumer toolchain ignored offline" "${TOOLCHAIN_WS}" '["lib-utils/src
 affected_libraries=["lib-core","lib-core-ext","lib-utils"]
 affected_binaries=["app-alpha","app-beta","tool-alpha"]
 force_all=false' \
-  -e TRUST_CARGO_CONFIG=true
+  -e INPUT_TRUST_CARGO_CONFIG=true
 run_failing_case "unpinned toolchain fails without installing" "${TOOLCHAIN_WS}" '["lib-utils/src/lib.rs"]' "" "" 'is not installed' \
-  -e RUSTUP_TOOLCHAIN= -e TRUST_CARGO_CONFIG=true
+  -e RUSTUP_TOOLCHAIN= -e INPUT_TRUST_CARGO_CONFIG=true
 # Started outside the checkout, rustup cannot see the toolchain file either.
 run_case "toolchain file unread when the checkout is untrusted" "${TOOLCHAIN_WS}" '["lib-utils/src/lib.rs"]' "" "" \
 'changed_packages=["lib-utils"]
@@ -371,7 +375,7 @@ affected_libraries=["lib-core","lib-core-ext","lib-utils"]
 affected_binaries=["app-alpha","app-beta","tool-alpha"]
 force_all=false'
 run_case "repository cargo config honoured when trusted" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
-  -e TRUST_CARGO_CONFIG=true
+  -e INPUT_TRUST_CARGO_CONFIG=true
 # Without this, the cases below would pass even if the isolation did nothing.
 [[ -f "${CONFIG_WS}/EXECUTED" ]] || fail "the planted program did not run in a trusted checkout"
 rm -f "${CONFIG_WS}/EXECUTED"
@@ -382,8 +386,16 @@ run_case "repository cargo config unread from a member" "${CONFIG_WS}" '["lib-ut
 # The switch removed in v5 must not turn the isolation off.
 run_case "removed IGNORE_CARGO_CONFIG variable is unread" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
   -e IGNORE_CARGO_CONFIG=false
+# A variable the job defines under an input's bare name must not replace the input.
+run_case "job variable cannot replace the trust input" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" "${CONFIG_EXPECTED}" \
+  -e TRUST_CARGO_CONFIG=true
+# Cargo reads $CARGO_HOME/config.toml wherever it starts, so a home inside an
+# untrusted checkout is refused before Cargo runs.
+run_failing_case "CARGO_HOME inside an untrusted checkout" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" \
+  'CARGO_HOME \(/github/workspace/\.cargo\) is inside the checkout' \
+  -e CARGO_HOME=/github/workspace/.cargo
 [[ "${config_before}" = "$(snapshot "${CONFIG_WS}")" ]] || fail "an untrusted checkout still ran the planted program or changed the workspace"
-run_failing_case "invalid trust_cargo_config" "${FIXTURE}" '["x"]' "" "" "TRUST_CARGO_CONFIG must be" -e TRUST_CARGO_CONFIG=yes
+run_failing_case "invalid trust_cargo_config" "${FIXTURE}" '["x"]' "" "" "TRUST_CARGO_CONFIG must be" -e INPUT_TRUST_CARGO_CONFIG=yes
 
 # The dependency repository is owned by the host user while the container runs
 # as root, and git refuses to serve a repository owned by someone else unless it
@@ -396,7 +408,7 @@ EXPECTED_ANNOTATIONS="${LOCK_WARNING}" run_case "git dependency fetched with the
 affected_libraries=["consumer"]
 affected_binaries=[]
 force_all=false' \
-  -e CARGO_NET_OFFLINE=false -e TRUST_CARGO_CONFIG=true -v "${GITDEP}:/github/gitdep:ro" \
+  -e CARGO_NET_OFFLINE=false -e INPUT_TRUST_CARGO_CONFIG=true -v "${GITDEP}:/github/gitdep:ro" \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*'
 rm -rf "${GITDEP}" "${GITWS}" || echo "warning: could not remove ${GITDEP} ${GITWS}" >&2
 

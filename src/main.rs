@@ -3,6 +3,7 @@ use rust_affected::{AffectedResult, Warning, WorkspaceGraph, compute_affected};
 use std::{
     collections::HashSet,
     env,
+    ffi::OsString,
     fs::File,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -30,9 +31,21 @@ fn format_annotation(level: &str, message: &str) -> String {
     format!("::{level}::{escaped}")
 }
 
-fn text(name: &str) -> Result<String, String> {
-    env::var_os(name)
+/// An input's raw value.
+///
+/// The runner sets `INPUT_<NAME>` for every input `action.yml` declares, over
+/// whatever the job's environment holds, so that is what the workflow passed.
+/// The bare `<NAME>` is read only when `INPUT_<NAME>` is absent, which never
+/// happens on a runner: there a job-level variable that happens to share the
+/// name must not replace the input, least of all `TRUST_CARGO_CONFIG`.
+fn raw(name: &str) -> OsString {
+    env::var_os(format!("INPUT_{name}"))
+        .or_else(|| env::var_os(name))
         .unwrap_or_default()
+}
+
+fn text(name: &str) -> Result<String, String> {
+    raw(name)
         .into_string()
         .map_err(|_| format!("{name} is not valid UTF-8"))
 }
@@ -66,7 +79,7 @@ fn changed_files() -> Result<Vec<String>, String> {
 
 fn flag(name: &str) -> Result<bool, String> {
     // Anything but an exact boolean fails, so a typo cannot disable a safeguard.
-    match env::var_os(name).unwrap_or_default().to_str() {
+    match raw(name).to_str() {
         Some("" | "false") => Ok(false),
         Some("true") => Ok(true),
         _ => Err(format!("{name} must be 'true' or 'false'")),
@@ -163,6 +176,56 @@ fn outside_checkout() -> Result<(PathBuf, PathBuf), String> {
     Ok((manifest, root))
 }
 
+/// Refuse a `CARGO_HOME` inside the checkout.
+///
+/// Cargo reads `$CARGO_HOME/config.toml` wherever it starts, so starting it at
+/// the filesystem root does not help when the job keeps `CARGO_HOME` in the
+/// checkout: that file is then the pull request's. The checkout is
+/// `GITHUB_WORKSPACE`, or failing that the outermost directory above the
+/// working directory that holds a manifest.
+fn reject_cargo_home_in_checkout(neutral: &Path) -> Result<(), String> {
+    let Some(home) = env::var_os("CARGO_HOME").filter(|home| !home.is_empty()) else {
+        return Ok(());
+    };
+    // Cargo resolves a relative CARGO_HOME against the directory it starts in.
+    let home = resolved(&neutral.join(home));
+    let cwd = env::current_dir()
+        .map_err(|error| format!("failed to read the working directory: {error}"))?;
+    let outermost = cwd
+        .ancestors()
+        .filter(|directory| directory.join("Cargo.toml").is_file())
+        .last()
+        .map(Path::to_path_buf);
+    let workspace = env::var_os("GITHUB_WORKSPACE")
+        .filter(|workspace| !workspace.is_empty())
+        .map(PathBuf::from);
+    if [workspace, outermost]
+        .into_iter()
+        .flatten()
+        .any(|checkout| home.starts_with(resolved(&checkout)))
+    {
+        return Err(format!(
+            "CARGO_HOME ({}) is inside the checkout, so Cargo would read configuration from the repository although trust_cargo_config is false. Point CARGO_HOME outside the checkout, or set trust_cargo_config: true if this checkout is trusted.",
+            home.display()
+        ));
+    }
+    Ok(())
+}
+
+/// The path with symbolic links resolved as far as it exists; the rest is kept as written.
+fn resolved(path: &Path) -> PathBuf {
+    let path = path_clean::clean(path);
+    for existing in path.ancestors() {
+        if let Ok(real) = existing.canonicalize() {
+            return match path.strip_prefix(existing) {
+                Ok(rest) if !rest.as_os_str().is_empty() => real.join(rest),
+                _ => real,
+            };
+        }
+    }
+    path
+}
+
 /// The absolute workspace manifest, as `cargo locate-project` reports it.
 fn workspace_manifest(locate: &mut Command) -> Result<PathBuf, String> {
     let manifest = String::from_utf8(run_cargo(locate, "locate-project")?)
@@ -255,6 +318,7 @@ fn load_graph(trust_cargo_config: bool) -> Result<WorkspaceGraph, String> {
         None
     } else {
         let (manifest, root) = outside_checkout()?;
+        reject_cargo_home_in_checkout(&root)?;
         locate
             .arg("--manifest-path")
             .arg(manifest)
