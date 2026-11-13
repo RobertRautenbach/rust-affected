@@ -35,17 +35,42 @@ RUN TARGET="$(cat /rust-target)" && \
     cargo build --release --locked --target "$TARGET" -p rust-affected && \
     cp "target/$TARGET/release/rust-affected" /rust-affected
 
-# The binary shells out to `cargo metadata`, so the runtime image needs a Rust
-# toolchain. git stays too: when a consumer sets `net.git-fetch-with-cli = true`
-# cargo fetches git dependencies by spawning the git CLI (the smoke test covers
-# that configuration). This RUN executes on the target platform, so the release
+# The binary shells out to `cargo metadata`, so the runtime image needs cargo and
+# rustc. Cargo asks rustc only for its version and target configuration and
+# never compiles, so everything a build would need is removed here: the standard
+# library, the linkers, rustdoc, the documentation and the C toolchain. That is
+# about two thirds of the image. libgcc stays: cargo and rustc link against it.
+# git stays too: when a consumer sets `net.git-fetch-with-cli = true` cargo
+# fetches git dependencies by spawning the git CLI (the smoke test covers that
+# configuration). This RUN executes on the target platform, so the release
 # build needs QEMU for the arm64 image.
-FROM rust:1.99.1-alpine3.23@sha256:51e1b72c7f236093c084f6e3051239f033fba9e4c0c1430cc2ed479d0a3bd14c
+FROM rust:1.99.1-alpine3.23@sha256:51e1b72c7f236093c084f6e3051239f033fba9e4c0c1430cc2ed479d0a3bd14c AS runtime
+RUN set -eux; \
+    apk add --no-cache git libgcc; \
+    apk del --no-cache gcc musl-dev; \
+    sysroot="$(rustc --print sysroot)"; \
+    rm -rf "$sysroot"/lib/rustlib/*/lib "$sysroot"/lib/rustlib/*/bin \
+      "$sysroot/bin/rustdoc" "$sysroot/share" "$sysroot/libexec" "$sysroot/etc"; \
+    # A name that does not change with the Rust version, for RUSTUP_TOOLCHAIN below.
+    rustup toolchain link pinned "$sysroot"; \
+    # Fail the build if the pruned toolchain can no longer answer cargo metadata.
+    mkdir -p /tmp/probe/src; \
+    printf '[package]\nname = "probe"\nversion = "0.0.0"\nedition = "2021"\n' > /tmp/probe/Cargo.toml; \
+    : > /tmp/probe/src/lib.rs; \
+    RUSTUP_TOOLCHAIN=pinned RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/tmp/probe/cargo-home \
+      cargo metadata --format-version 1 --offline --manifest-path /tmp/probe/Cargo.toml > /dev/null; \
+    rm -rf /tmp/probe
+
+# Files deleted in a later layer still ship in the earlier one, so the pruned
+# filesystem is copied into an empty image. That drops the base image's
+# environment, which is restated here.
+FROM scratch
+COPY --from=runtime / /
+ENV PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo
 # Use the installed toolchain even when the checkout contains rust-toolchain.toml.
-# Derive the pin from the base image so dependency updates keep it in sync.
-ENV RUSTUP_TOOLCHAIN=${RUST_VERSION} RUSTUP_AUTO_INSTALL=0
-RUN test -n "${RUSTUP_TOOLCHAIN}" && rustup run "${RUSTUP_TOOLCHAIN}" cargo --version \
-    && apk add --no-cache git
+ENV RUSTUP_TOOLCHAIN=pinned RUSTUP_AUTO_INSTALL=0
 
 LABEL org.opencontainers.image.title="rust-affected"
 LABEL org.opencontainers.image.description="Computes affected Cargo workspace members from a set of changed files via the Cargo dependency graph"
