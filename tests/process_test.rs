@@ -334,6 +334,85 @@ fn cargo_home_inside_an_untrusted_checkout_is_refused() {
     assert!(marker.exists());
 }
 
+/// The toolchain's own `rustc`, next to the `cargo` running these tests.
+///
+/// A run that gets past the guard with a relocated `RUSTUP_HOME` would
+/// otherwise reach `rustc` through the rustup proxy, which looks for the
+/// toolchain in that home and may try to download it.
+fn toolchain_rustc() -> PathBuf {
+    Path::new(env!("CARGO")).with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX))
+}
+
+#[test]
+fn rustup_home_inside_an_untrusted_checkout_is_refused() {
+    // rustup runs cargo and rustc from $RUSTUP_HOME/toolchains wherever it starts.
+    let scratch = workspace();
+    std::fs::write(scratch.path().join("Cargo.lock"), MEMBER_LOCK).unwrap();
+    let message = "is inside the checkout, so rustup would run a toolchain from the repository although trust_cargo_config is false";
+    // The home need not exist yet: the pull request could add it.
+    let home = scratch.path().join(".rustup");
+    let home = home.to_str().unwrap();
+    for directory in ["", "member"] {
+        let output = run(
+            &scratch.path().join(directory),
+            &[CHANGED_MEMBER, ("RUSTUP_HOME", home)],
+        );
+        assert_error(&output, message);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("::error::RUSTUP_HOME ("));
+    }
+    // An acceptable CARGO_HOME does not end the check before RUSTUP_HOME is looked at.
+    let outside = tempfile::tempdir().unwrap();
+    let outside = outside.path().to_str().unwrap();
+    assert_error(
+        &run(
+            scratch.path(),
+            &[
+                CHANGED_MEMBER,
+                ("CARGO_HOME", outside),
+                ("RUSTUP_HOME", home),
+            ],
+        ),
+        message,
+    );
+    // Past the guard, Cargo is given rustc directly so that rustup is never consulted.
+    let rustc = toolchain_rustc();
+    let passing = |envs: &[(&str, &str)]| {
+        let output = command(scratch.path())
+            .envs([CHANGED_MEMBER, ("RUSTUP_AUTO_INSTALL", "0")])
+            .env("RUSTC", &rustc)
+            .envs(envs.iter().copied())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{envs:?}: {stderr}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), MEMBER_OUTPUT);
+    };
+    // A home outside the checkout is the job's own business.
+    passing(&[("RUSTUP_HOME", outside)]);
+    // Trusted, the checkout may supply whatever it likes.
+    passing(&[("RUSTUP_HOME", home), ("TRUST_CARGO_CONFIG", "true")]);
+    // GITHUB_WORKSPACE names the checkout even when no manifest sits at its top.
+    let outer = tempfile::tempdir().unwrap();
+    let inner = outer.path().join("crates");
+    std::fs::create_dir_all(inner.join("src")).unwrap();
+    std::fs::write(
+        inner.join("Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(inner.join("src/lib.rs"), "").unwrap();
+    let sibling = outer.path().join("rustup-home");
+    let output = command(&inner)
+        .envs([
+            ("CHANGED_FILES_JSON", r#"["src/lib.rs"]"#),
+            ("RUSTUP_HOME", sibling.to_str().unwrap()),
+        ])
+        .env("GITHUB_WORKSPACE", outer.path())
+        .output()
+        .unwrap();
+    assert_error(&output, message);
+}
+
 #[cfg(unix)]
 #[test]
 fn repository_cargo_config_is_read_only_when_trusted() {
