@@ -394,6 +394,11 @@ run_case "job variable cannot replace the trust input" "${CONFIG_WS}" '["lib-uti
 run_failing_case "CARGO_HOME inside an untrusted checkout" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" \
   'CARGO_HOME \(/github/workspace/\.cargo\) is inside the checkout' \
   -e CARGO_HOME=/github/workspace/.cargo
+# rustup runs cargo and rustc from $RUSTUP_HOME/toolchains, so that home is
+# refused there as well. Had rustup started, it would have created the directory.
+run_failing_case "RUSTUP_HOME inside an untrusted checkout" "${CONFIG_WS}" '["lib-utils/src/lib.rs"]' "" "" \
+  'RUSTUP_HOME \(/github/workspace/\.rustup\) is inside the checkout' \
+  -e RUSTUP_HOME=/github/workspace/.rustup
 [[ "${config_before}" = "$(snapshot "${CONFIG_WS}")" ]] || fail "an untrusted checkout still ran the planted program or changed the workspace"
 run_failing_case "invalid trust_cargo_config" "${FIXTURE}" '["x"]' "" "" "TRUST_CARGO_CONFIG must be" -e INPUT_TRUST_CARGO_CONFIG=yes
 

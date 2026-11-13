@@ -176,19 +176,28 @@ fn outside_checkout() -> Result<(PathBuf, PathBuf), String> {
     Ok((manifest, root))
 }
 
-/// Refuse a `CARGO_HOME` inside the checkout.
+/// Homes the job's environment can relocate, and what one inside the checkout
+/// would let a pull request do.
+const HOMES: [(&str, &str); 2] = [
+    (
+        "CARGO_HOME",
+        "Cargo would read configuration from the repository",
+    ),
+    (
+        "RUSTUP_HOME",
+        "rustup would run a toolchain from the repository",
+    ),
+];
+
+/// Refuse a `CARGO_HOME` or `RUSTUP_HOME` inside the checkout.
 ///
-/// Cargo reads `$CARGO_HOME/config.toml` wherever it starts, so starting it at
-/// the filesystem root does not help when the job keeps `CARGO_HOME` in the
-/// checkout: that file is then the pull request's. The checkout is
+/// Cargo reads `$CARGO_HOME/config.toml` wherever it starts, and rustup runs
+/// `cargo` and `rustc` from `$RUSTUP_HOME/toolchains`. Starting them at the
+/// filesystem root does not help when the job keeps either home in the
+/// checkout: its contents are then the pull request's. The checkout is
 /// `GITHUB_WORKSPACE`, or failing that the outermost directory above the
 /// working directory that holds a manifest.
-fn reject_cargo_home_in_checkout(neutral: &Path) -> Result<(), String> {
-    let Some(home) = env::var_os("CARGO_HOME").filter(|home| !home.is_empty()) else {
-        return Ok(());
-    };
-    // Cargo resolves a relative CARGO_HOME against the directory it starts in.
-    let home = resolved(&neutral.join(home));
+fn reject_homes_in_checkout(neutral: &Path) -> Result<(), String> {
     let cwd = env::current_dir()
         .map_err(|error| format!("failed to read the working directory: {error}"))?;
     let outermost = cwd
@@ -199,15 +208,23 @@ fn reject_cargo_home_in_checkout(neutral: &Path) -> Result<(), String> {
     let workspace = env::var_os("GITHUB_WORKSPACE")
         .filter(|workspace| !workspace.is_empty())
         .map(PathBuf::from);
-    if [workspace, outermost]
+    let checkouts: Vec<PathBuf> = [workspace, outermost]
         .into_iter()
         .flatten()
-        .any(|checkout| home.starts_with(resolved(&checkout)))
-    {
-        return Err(format!(
-            "CARGO_HOME ({}) is inside the checkout, so Cargo would read configuration from the repository although trust_cargo_config is false. Point CARGO_HOME outside the checkout, or set trust_cargo_config: true if this checkout is trusted.",
-            home.display()
-        ));
+        .map(|checkout| resolved(&checkout))
+        .collect();
+    for (name, consequence) in HOMES {
+        let Some(home) = env::var_os(name).filter(|home| !home.is_empty()) else {
+            continue;
+        };
+        // Cargo and rustup resolve a relative home against the directory they start in.
+        let home = resolved(&neutral.join(home));
+        if checkouts.iter().any(|checkout| home.starts_with(checkout)) {
+            return Err(format!(
+                "{name} ({}) is inside the checkout, so {consequence} although trust_cargo_config is false. Point {name} outside the checkout, or set trust_cargo_config: true if this checkout is trusted.",
+                home.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -318,7 +335,7 @@ fn load_graph(trust_cargo_config: bool) -> Result<WorkspaceGraph, String> {
         None
     } else {
         let (manifest, root) = outside_checkout()?;
-        reject_cargo_home_in_checkout(&root)?;
+        reject_homes_in_checkout(&root)?;
         locate
             .arg("--manifest-path")
             .arg(manifest)
