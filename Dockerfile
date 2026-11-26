@@ -44,7 +44,7 @@ RUN TARGET="$(cat /rust-target)" && \
 # fetches git dependencies by spawning the git CLI (the smoke test covers that
 # configuration). This RUN executes on the target platform, so the release
 # build needs QEMU for the arm64 image.
-FROM rust:1.99.1-alpine3.23@sha256:51e1b72c7f236093c084f6e3051239f033fba9e4c0c1430cc2ed479d0a3bd14c AS runtime
+FROM rust:1.100.0-alpine3.23@sha256:9577a4edf61be25721f5fa4006ad463b83ea52c0a17c6e6b673c72c794aee738 AS runtime
 RUN set -eux; \
     apk add --no-cache git libgcc; \
     apk del --no-cache gcc musl-dev; \
